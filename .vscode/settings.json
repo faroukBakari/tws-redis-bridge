@@ -1,0 +1,14 @@
+{
+    // Python interpreter configuration - use Python 3.10 where Conan is installed
+    "python.defaultInterpreterPath": "/usr/bin/python3",
+    "python.analysis.extraPaths": [
+        "/home/farouk/.local/lib/python3.10/site-packages"
+    ],
+    "python.analysis.typeCheckingMode": "basic",
+    
+    // CMake configuration
+    "cmake.useCMakePresets": "always",
+    "cmake.configureSettings": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+    }
+}

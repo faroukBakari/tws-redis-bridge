@@ -42,7 +42,6 @@ _deps/
 *.app
 
 # IDE files
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -62,4 +61,3 @@ core.*
 # Dependencies
 third_party/
 external/
-vendor/

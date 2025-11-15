@@ -12,7 +12,31 @@ Your primary responsibilities are to:
 
 ---
 
-## 2. ❗ Immutable Rules
+## 2. 🎯 Core Project Directives
+
+These are specific architectural mandates for this TWS-to-Redis bridge.
+
+* **Project specification document:**:
+    * docs/PROJECT-SPECIFICATION.md
+* **TWS API Research First:**
+    * The TWS C++ API is the primary implementation challenge.
+    * Your first step for any TWS-related task **must** be to consult the **official TWS API documentation** (see Section 5) for C++ patterns, message formats, and callback signatures.
+* **Redis Pub/Sub Adapter:**
+    * You **must** create a `RedisPublisher` (or similar) class.
+    * This class **must** abstract the `redis-plus-plus` library. The rest of the application will only interact with this abstraction (e.g., `redis.publish("market_ticks", ...)`), not `redis-plus-plus` directly.
+* **Data Serialization:**
+    * All data published to Redis **must** be serialized to JSON using the **`RapidJSON`** library.
+    * This is for initial development speed and debuggability. You should be prepared to profile this step and suggest migration to a binary format (like Protobuf) if serialization becomes a bottleneck.
+* **Test-Driven Development (TDD) First:**
+    * All parsing and data normalization logic **must** be developed via TDD.
+    * Use Catch2 as the framework.
+    * The **replay-mode CLI utility** is a primary testing tool. Unit tests for the parser should be built using sample messages extracted from tick files.
+    * End-to-end tests **must** use Docker (`docker-compose`) to run a live Redis instance for verification.
+    * **File Structure:** All tests for ``src/my_feature.cpps`` should be placed in a parallel `tests/test_my_feature.cpp file`.
+
+---
+
+## 3. ❗ Immutable Rules
 
 These rules are critical and must be followed at all times.
 
@@ -31,28 +55,6 @@ These rules are critical and must be followed at all times.
   * **Static Polymorphism:** Prefer compile-time polymorphism (templates, CRTP) over runtime polymorphism (virtual functions) whenever possible.
   * **Zero-Cost Abstractions:** Design abstractions that compile down to efficient machine code with no runtime overhead.
   * **Memory Locality:** Design data structures with cache-friendly memory layouts. Prefer contiguous storage (`std::vector`, `std::array`) over pointer-chasing structures.
-
----
-
-## 3. 🎯 Core Project Directives
-
-These are specific architectural mandates for this TWS-to-Redis bridge.
-
-* **TWS API Research First:**
-    * The TWS C++ API is the primary implementation challenge.
-    * Your first step for any TWS-related task **must** be to consult the **official TWS API documentation** (see Section 5) for C++ patterns, message formats, and callback signatures.
-* **Redis Pub/Sub Adapter:**
-    * You **must** create a `RedisPublisher` (or similar) class.
-    * This class **must** abstract the `redis-plus-plus` library. The rest of the application will only interact with this abstraction (e.g., `redis.publish("market_ticks", ...)`), not `redis-plus-plus` directly.
-* **Data Serialization:**
-    * All data published to Redis **must** be serialized to JSON using the **`RapidJSON`** library.
-    * This is for initial development speed and debuggability. You should be prepared to profile this step and suggest migration to a binary format (like Protobuf) if serialization becomes a bottleneck.
-* **Test-Driven Development (TDD) First:**
-    * All parsing and data normalization logic **must** be developed via TDD.
-    * Use Catch2 as the framework.
-    * The **replay-mode CLI utility** is a primary testing tool. Unit tests for the parser should be built using sample messages extracted from tick files.
-    * End-to-end tests **must** use Docker (`docker-compose`) to run a live Redis instance for verification.
-    * **File Structure:** All tests for ``src/my_feature.cpps`` should be placed in a parallel `tests/test_my_feature.cpp file`.
 
 ---
 

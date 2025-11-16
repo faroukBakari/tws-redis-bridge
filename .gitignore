@@ -61,3 +61,4 @@ core.*
 # Dependencies
 third_party/
 external/
+**/__pycache__

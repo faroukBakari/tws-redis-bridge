@@ -1,4 +1,7 @@
-// TwsClient.cpp - Implementation of TWS API wrapper
+// TwsClient.cpp - TWS API bidirectional adapter implementation
+// Implements both sides of TWS communication:
+// 1. Outbound: Send commands to TWS (via EClientSocket)
+// 2. Inbound: Receive callbacks from TWS (via EWrapper interface)
 
 #include "TwsClient.h"
 #include "EClientSocket.h"
@@ -13,11 +16,14 @@ TwsClient::TwsClient(moodycamel::ConcurrentQueue<TickUpdate>& queue)
     : m_queue(queue)
     , m_signal(std::make_unique<EReaderOSSignal>())
     , m_client(std::make_unique<EClientSocket>(this, m_signal.get())) {
+    // NOTE: "this" pointer passed to EClientSocket - TWS stores it and calls our callbacks
 }
 
 TwsClient::~TwsClient() {
     disconnect();
 }
+
+// ========== Outbound API: Commands we send TO TWS ==========
 
 bool TwsClient::connect(const std::string& host, unsigned int port, int clientId) {
     std::cout << "[TWS] Attempting connection to " << host << ":" << port << "\n";
@@ -28,12 +34,13 @@ bool TwsClient::connect(const std::string& host, unsigned int port, int clientId
         return false;
     }
     
-    // REASON: TWS API requires EReader thread for message processing
+    // ========== START THREAD 3: EReader Socket Reader ==========
+    // This spawns a new thread that reads from TWS socket and signals main thread
     m_reader = std::make_unique<EReader>(m_client.get(), m_signal.get());
-    m_reader->start();
+    m_reader->start();  // <-- Internal std::thread created here by TWS API
     m_connected.store(true);
     
-    std::cout << "[TWS] Connection established, EReader started\n";
+    std::cout << "[TWS] Connection established, EReader thread started\n";
     return true;
 }
 
@@ -52,36 +59,39 @@ bool TwsClient::isConnected() const {
 void TwsClient::subscribeTickByTick(const std::string& symbol, int tickerId) {
     std::cout << "[TWS] Subscribing to tick-by-tick for " << symbol << " (tickerId=" << tickerId << ")\n";
     
-    // REASON: Store tickerId → symbol mapping for callback routing
+    // Store tickerId → symbol mapping for callback routing
     m_tickerToSymbol[tickerId] = symbol;
     
-    // REASON: Create stock contract for US equities
+    // Create stock contract for US equities
     Contract contract;
     contract.symbol = symbol;
     contract.secType = "STK";
     contract.exchange = "SMART";
     contract.currency = "USD";
     
-    // REASON: Subscribe to both BidAsk and AllLast tick types
-    // BidAsk uses base tickerId, AllLast uses tickerId + 10000
+    // Subscribe to both BidAsk and AllLast tick types
+    // Convention: BidAsk uses base tickerId, AllLast uses tickerId + 10000
     m_client->reqTickByTickData(tickerId, contract, "BidAsk", 0, true);
     m_client->reqTickByTickData(tickerId + 10000, contract, "AllLast", 0, true);
     
-    // REASON: Store second tickerId mapping for AllLast
+    // Store second tickerId mapping for AllLast
     m_tickerToSymbol[tickerId + 10000] = symbol;
 }
 
 void TwsClient::processMessages() {
-    // REASON: EReader signals when messages are available
+    // EReader signals when messages are available (cross-thread notification)
     m_signal->waitForSignal();
+    // Decode and dispatch callbacks on THIS thread (Thread 1)
     m_reader->processMsgs();
 }
+
+// ========== Inbound API: Callbacks TWS invokes ON us ==========
 
 void TwsClient::connectAck() {
     std::cout << "[TWS] Connection acknowledged\n";
 }
 
-// ========== EWrapper Callback Implementations ==========
+// ========== Critical Callbacks: Market Data ==========
 
 void TwsClient::nextValidId(OrderId orderId) {
     std::cout << "[TWS] nextValidId: " << orderId << " (connection confirmed)\n";
@@ -95,9 +105,10 @@ void TwsClient::connectionClosed() {
 
 void TwsClient::error(int id, time_t errorTime, int errorCode, const std::string& errorString, 
                       const std::string& advancedOrderRejectJson) {
-    (void)errorTime;  // REASON: Unused parameter, keep for API compatibility
-    (void)advancedOrderRejectJson;  // REASON: Not used in this implementation
-    // REASON: Filter informational messages (code 2104, 2106, 2158)
+    (void)errorTime;  // Unused in MVP
+    (void)advancedOrderRejectJson;
+    
+    // Filter informational messages (TWS connection status codes)
     if (errorCode == 2104 || errorCode == 2106 || errorCode == 2158) {
         std::cout << "[TWS] Info [" << errorCode << "]: " << errorString << "\n";
     } else {
@@ -108,15 +119,16 @@ void TwsClient::error(int id, time_t errorTime, int errorCode, const std::string
 void TwsClient::tickByTickBidAsk(int reqId, time_t time, double bidPrice, double askPrice,
                                  Decimal bidSize, Decimal askSize, 
                                  const TickAttribBidAsk& tickAttribBidAsk) {
-    (void)tickAttribBidAsk;  // REASON: Not used in this implementation
-    // REASON: Look up symbol from tickerId
+    (void)tickAttribBidAsk;  // MVP doesn't use bid/ask attributes
+    
+    // Look up symbol from tickerId
     auto it = m_tickerToSymbol.find(reqId);
     if (it == m_tickerToSymbol.end()) {
         std::cerr << "[TWS] Unknown tickerId: " << reqId << "\n";
         return;
     }
     
-    // PERFORMANCE: Construct TickUpdate on stack, then enqueue (zero-copy)
+    // CRITICAL PATH: Construct update on stack, enqueue without heap allocation
     TickUpdate update;
     update.tickerId = reqId;
     update.type = TickUpdateType::BidAsk;
@@ -126,7 +138,7 @@ void TwsClient::tickByTickBidAsk(int reqId, time_t time, double bidPrice, double
     update.bidSize = static_cast<int>(bidSize);
     update.askSize = static_cast<int>(askSize);
     
-    // CRITICAL: Enqueue must be < 1μs (non-blocking)
+    // CRITICAL: Non-blocking enqueue, target < 1μs
     if (!m_queue.try_enqueue(update)) {
         std::cerr << "[TWS] Queue full! Dropping BidAsk update\n";
     }
@@ -135,9 +147,9 @@ void TwsClient::tickByTickBidAsk(int reqId, time_t time, double bidPrice, double
 void TwsClient::tickByTickAllLast(int reqId, int tickType, time_t time, double price,
                                   Decimal size, const TickAttribLast& tickAttribLast,
                                   const std::string& exchange, const std::string& specialConditions) {
-    (void)tickType;  // REASON: Not used in this implementation
-    (void)exchange;  // REASON: Not used in this implementation  
-    (void)specialConditions;  // REASON: Not used in this implementation
+    (void)tickType;
+    (void)exchange;
+    (void)specialConditions;
     auto it = m_tickerToSymbol.find(reqId);
     if (it == m_tickerToSymbol.end()) {
         std::cerr << "[TWS] Unknown tickerId: " << reqId << "\n";
@@ -157,7 +169,8 @@ void TwsClient::tickByTickAllLast(int reqId, int tickType, time_t time, double p
     }
 }
 
-// REASON: Unused callbacks for standard market data (not tick-by-tick)
+// ========== Unused Callbacks (stub implementations) ==========
+
 void TwsClient::tickPrice(TickerId tickerId, TickType field, double price, const TickAttrib& attribs) {
     (void)tickerId; (void)field; (void)price; (void)attribs;
     // Not used in tick-by-tick mode

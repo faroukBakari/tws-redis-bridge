@@ -1,0 +1,26 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/include",
+                "${workspaceFolder}/vendor/tws-api/source/cppclient/client",
+                "${workspaceFolder}/vendor/tws-api/source/cppclient/client/protobufUnix",
+                "/home/farouk/.conan2/p/rapidf7a3355ba53c4/p/include",
+                "/home/farouk/.conan2/p/redis7aca600690447/p/include",
+                "/home/farouk/.conan2/p/hiredcb182f3bfdba4/p/include",
+                "/home/farouk/.conan2/p/concu0e8c745f17630/p/include",
+                "/home/farouk/.conan2/p/concu0e8c745f17630/p/include/moodycamel",
+                "/usr/include"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/g++",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64",
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+            "configurationProvider": "ms-vscode.cmake-tools"
+        }
+    ],
+    "version": 4
+}

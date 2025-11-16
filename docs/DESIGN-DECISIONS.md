@@ -58,31 +58,91 @@ Requires deep research into:
 - Proven stability and compatibility
 - Handles protocol complexity and versioning
 
+#### Understanding the TWS API Architecture
+
+The TWS C++ API uses a **bidirectional communication pattern** that can be confusing due to misleading naming:
+
+##### The Components
+
+**EWrapper (Inbound API - Misleadingly Named)**
+- **What it is**: A callback interface (Observer pattern)
+- **What it's NOT**: Despite the name, it's **not** a wrapper
+- **Better name would be**: `ITwsCallbacks` or `IEventHandler`
+- **Role**: Defines callbacks that **TWS invokes on your application**
+- **Direction**: TWS → Application (inbound data)
+- **Example callbacks**: `tickByTickBidAsk()`, `error()`, `nextValidId()`
+
+**EClient/EClientSocket (Outbound API)**
+- **What it is**: Command interface
+- **Role**: Defines methods **your application calls to send requests to TWS**
+- **Direction**: Application → TWS (outbound commands)
+- **Example methods**: `reqTickByTickData()`, `eConnect()`, `placeOrder()`
+
+**EReader (Internal Thread Manager)**
+- Spawns Thread 3 (socket reader) when `start()` is called
+- Reads TCP socket, parses TWS protocol, enqueues messages
+- See `src/TwsClient.cpp` line 39 for creation point
+
+##### TwsClient: A Bidirectional Adapter
+
+Our `TwsClient` class serves dual roles:
+
+```
+Application (TwsClient)
+      ↑ callbacks      ↓ commands
+  EWrapper         EClientSocket
+      ↑                   ↓
+           TWS Gateway
+```
+
+**Implementation Pattern**:
+- **Inherits** `EWrapper` to implement callbacks (inbound)
+- **Wraps** `EClientSocket` member to send commands (outbound)
+
+**Code Reference**: See `include/TwsClient.h`:
+- Lines 1-8: Architecture clarification comments
+- Lines 30-36: Explicit separation of Outbound API (commands) vs Inbound API (callbacks)
+- Lines 171-177: Member variables showing the wrapping of `EClientSocket`
+
+**Key Insight**: This bidirectional pattern is fundamental to TWS integration. Understanding that `EWrapper` is a callback interface (not a wrapper) eliminates the primary source of confusion when working with the TWS API.
+
 ### 2. Threading Model (CRITICAL)
 
-**Problem**: The TWS C++ API is single-threaded. All `EWrapper` callbacks execute on the `EReader` thread that processes incoming TWS messages. Blocking this thread with I/O operations (like Redis publishing) will cause catastrophic message backlogs and latency spikes.
+**Problem**: EWrapper callbacks are executed on Thread 1 (Main) after `processMsgs()` dispatches them. Blocking this thread with I/O operations (like Redis publishing) will cause catastrophic message backlogs and latency spikes in the TWS message processing loop.
 
 **Decision**: Implement a Producer-Consumer architecture with lock-free queue
 
-#### Architecture
+#### Architecture (Matches Implementation)
 
-**Thread 1: TWS EReader Thread (Producer)**
+**Thread 1: Main Thread (Message Processing - Producer)**
+- **Created**: Implicit (program entry point)
+- **Location**: `src/main.cpp` lines 149-159
 - **Responsibility**: Process incoming TWS messages at maximum speed
 - **Critical Rule**: NEVER block this thread
 - **Implementation**:
-  - When a callback fires (e.g., `tickByTickAllLast`), perform minimal work:
-    - Copy the data into a thread-safe, lock-free queue
-    - Return immediately
-  - No JSON serialization, no state updates, no Redis I/O on this thread
+  - Runs message processing loop: `client.processMessages()` → `processMsgs()` → callbacks
+  - When a callback fires (e.g., `tickByTickBidAsk`), perform minimal work:
+    - Copy the data into a lock-free queue (`TickUpdate` struct)
+    - Return immediately (< 1μs target)
+  - No JSON serialization, no state aggregation, no Redis I/O on this thread
 
 **Thread 2: Redis Worker Thread (Consumer)**
+- **Created**: `std::thread workerThread(...)` at `main.cpp` line 121
+- **Location**: `redisWorkerLoop()` function at `main.cpp` lines 24-83
 - **Responsibility**: Process queued market data and publish to Redis
 - **Implementation Loop**:
-  1. Dequeue market data update from the thread-safe queue
-  2. Update internal instrument state (see Section 4)
+  1. Dequeue `TickUpdate` from the lock-free queue
+  2. Aggregate BidAsk + AllLast updates into `InstrumentState`
   3. Serialize complete state to JSON using RapidJSON
   4. Publish JSON to Redis via `redis-plus-plus`
   5. Repeat
+
+**Thread 3: EReader Thread (TWS API Internal)**
+- **Created**: `m_reader->start()` at `src/TwsClient.cpp` line 39
+- **Hidden**: Managed by TWS library (not visible in application code)
+- **Role**: Socket I/O, TWS protocol decoding, signaling Thread 1
+
+**Code Reference**: See `src/main.cpp` lines 123-125 and 149-155 for explicit thread creation points and architecture documentation.
 
 #### Queue Selection
 
@@ -90,7 +150,7 @@ Requires deep research into:
 
 **Rationale**:
 - Lock-free design (no mutex contention)
-- Optimized for single-producer, single-consumer scenarios
+- Optimized for SPSC (single-producer, single-consumer) scenarios
 - Significantly faster than `std::queue` with `std::mutex`
 - Battle-tested in high-frequency trading systems
 
@@ -136,6 +196,60 @@ void redisWorkerLoop() {
 - EReader thread latency: < 1μs per callback (just enqueue)
 - Redis Worker throughput: > 10,000 messages/second
 - End-to-end latency: < 50ms (TWS → Redis)
+
+### 2.1. Market Hours Pivot Strategy (ADR-009)
+
+**[DECISION]** Start with bar data (`reqHistoricalData` + `reqRealTimeBars`), transition to tick-by-tick when markets open **[Date: 2025-11-16]**
+
+**Context:** Development sprint began during market closure (holiday/weekend). Tick-by-tick data (`reqTickByTickData`) requires live market hours (9:30 AM - 4:00 PM ET). Need to validate architecture without waiting for market open.
+
+**Rationale:**
+- **Bar data available 24/7:** Historical bars (`reqHistoricalData`) and real-time bars (`reqRealTimeBars`) work outside market hours
+- **Architecture-agnostic:** Producer-consumer threading model, lock-free queue, state aggregation, and Redis publishing work identically regardless of data source
+- **Risk mitigation:** Validates critical path (TWS connection, EReader threading, queue performance) before attempting tick-by-tick
+- **Continuous development:** Enables Day 1-2 progress without market dependency
+- **Fallback testing:** Historical ticks (`reqHistoricalTicks`) provide tick-level data offline (1000 tick limit)
+
+**Implementation Timeline:**
+- **Day 1 Morning (Gate 1b):** Dev environment setup (Docker Compose, Redis, Makefile targets)
+- **Day 1 Afternoon (Gates 2a-2c):** Historical bar data end-to-end flow
+  - `reqHistoricalData("SPY", "1 D", "5 mins")` → 5-minute OHLCV bars
+  - Validate: TWS → Queue → Console → Redis
+- **Day 1 Evening (Gates 3a-3b):** Real-time bars + queue performance
+  - `reqRealTimeBars("SPY", 5, "TRADES")` → 5-second updates during off-hours
+  - Benchmark lock-free queue enqueue < 1μs
+- **Day 2 Morning (Gate 4):** Historical tick data testing
+  - `reqHistoricalTicks()` for BidAsk and Last trade data (if markets remain closed)
+  - Test state aggregation with tick-level granularity offline
+- **Day 3+ (Markets Open):** Transition to tick-by-tick
+  - Switch to `reqTickByTickData()` with live market data
+  - Validate tick-by-tick callbacks (`tickByTickBidAsk`, `tickByTickAllLast`)
+
+**Trade-offs:**
+- **Bar granularity vs tick precision:** 5-second bars sufficient for architecture validation, not true real-time
+- **Schema compatibility:** Bar data uses subset of tick schema (OHLCV fields, single timestamp) - JSON schema remains compatible
+- **State structure:** `InstrumentState` simplified for bars (no bid/ask/last separation), same struct with fields set to 0 when unavailable
+
+**Alternatives Rejected:**
+- **Wait for market hours:** Blocks Day 1-2 progress, violates fail-fast philosophy
+- **Mock data generator:** Doesn't validate TWS API integration (primary risk)
+- **Use sampled `reqMktData()`:** Even slower than bars (250ms sampling), doesn't test real-time pipeline
+
+**Consequences:**
+- ✅ Continuous development during market closure
+- ✅ Fail-fast validation of architecture before tick-by-tick complexity
+- ✅ Three fallback strategies: bars (24/7) → historical ticks (offline) → tick-by-tick (live)
+- ❌ Delayed tick-by-tick validation (acceptable: architecture proven first)
+- ❌ Bar data testing doesn't validate quote/trade merge logic (mitigated: Day 2 historical ticks)
+
+**Status:** **ACTIVE** (Day 1-2)
+- Gate 1a: ✅ PASSED (compilation successful)
+- Gate 1b: ⏳ IN PROGRESS (Redis container setup)
+- Gates 2a-2c: 🔴 BLOCKED (waiting for Gate 1b)
+
+**Reference:** See `docs/FAIL-FAST-PLAN.md` § 2.1 (Day 1), § 2.2 (Day 2), § 4.1 (Contingency Plans) for detailed implementation and fallback strategies.
+
+---
 
 ### 3. Market Data Subscription Strategy
 
@@ -274,6 +388,30 @@ writer.Int64(time); // Use TWS-provided timestamp, not std::time(nullptr)
 - Downstream consumers (FastAPI/Vue) always receive complete, up-to-date instrument snapshots
 - Simplifies client logic (no need to merge partial updates)
 - Ensures consistency even when bid/ask and last trade updates arrive at different times
+
+#### Bar Data Handling (Market Hours Pivot)
+
+**Context:** When using historical/real-time bars instead of tick-by-tick data (see § 2.1 Market Hours Pivot Strategy), state structure is simplified.
+
+**Bar Data State Fields:**
+- **OHLCV fields:** `open`, `high`, `low`, `close`, `volume` (from `historicalData()` or `realtimeBar()` callbacks)
+- **Single timestamp:** Bar start time (not separate quote/trade timestamps)
+- **No bid/ask/last separation:** Bars are trade-based aggregates, use `close` as last price
+
+**Transition Strategy:**
+- Same `InstrumentState` struct used for both bars and ticks
+- Bar mode: Set `lastPrice = close`, leave `bidPrice`/`askPrice` at 0.0 (or use `close` for all three)
+- JSON schema remains compatible: Consumers ignore missing/zero bid/ask fields when processing bar data
+- State aggregation logic unchanged: Update fields, serialize complete state, publish
+
+**Implementation Reference:**
+- See `src/Serialization.cpp` for `serializeBarData()` vs `serializeTickData()` implementations
+- Both use same Redis channel pattern: `TWS:TICKS:{SYMBOL}` (or `TWS:BARS:{SYMBOL}` for explicit bar channel)
+- Schema evolution: Bar data is subset of tick data, backward compatible
+
+**Rationale:** Maintaining schema compatibility enables seamless transition from bar testing to tick-by-tick production without downstream consumer changes.
+
+---
 
 ### 5. Data Format and Serialization
 

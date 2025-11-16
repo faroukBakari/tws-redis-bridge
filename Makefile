@@ -1,4 +1,4 @@
-.PHONY: deps build test clean run docker-up docker-down help
+.PHONY: help deps configure build test clean run docker-up docker-down docker-logs redis-cli redis-monitor validate-env format install-hooks
 
 # Default target
 .DEFAULT_GOAL := help
@@ -56,6 +56,51 @@ redis-cli: ## Connect to Redis CLI
 
 redis-monitor: ## Monitor Redis commands
 	docker exec -it tws-redis redis-cli MONITOR
+
+validate-env: ## Validate development environment (Gate 1b)
+	@echo "=== Validation Gate 1b: Development Environment ==="
+	@echo ""
+	@echo "Checking Redis container..."
+	@if docker ps | grep -q redis; then \
+		echo "✅ Redis container running"; \
+	else \
+		echo "❌ Redis container NOT running"; \
+		echo "   Run: make docker-up"; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "Checking Redis connectivity..."
+	@if docker exec tws-redis redis-cli PING 2>/dev/null | grep -q PONG; then \
+		echo "✅ Redis responds to PING"; \
+	else \
+		echo "❌ Redis not responding"; \
+		echo "   Check: docker-compose logs redis"; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "Checking TWS ports availability..."
+	@if ! lsof -i :7497 >/dev/null 2>&1; then \
+		echo "✅ Port 7497 (TWS live) available"; \
+	else \
+		echo "⚠️  Port 7497 in use (TWS may be running)"; \
+	fi
+	@if ! lsof -i :4002 >/dev/null 2>&1; then \
+		echo "✅ Port 4002 (TWS paper) available"; \
+	else \
+		echo "⚠️  Port 4002 in use (TWS may be running)"; \
+	fi
+	@echo ""
+	@echo "Checking bridge binary..."
+	@if [ -f $(BUILD_DIR)/tws_bridge ]; then \
+		echo "✅ Bridge binary exists: $(BUILD_DIR)/tws_bridge"; \
+	else \
+		echo "❌ Bridge binary NOT found"; \
+		echo "   Run: make build"; \
+		exit 1; \
+	fi
+	@echo ""
+	@echo "✅ Validation Gate 1b: PASSED"
+	@echo "Ready to proceed to Day 1 Afternoon (Gates 2a-2c)"
 
 format: ## Format code (requires clang-format)
 	find src include tests -name "*.cpp" -o -name "*.h" | xargs clang-format -i

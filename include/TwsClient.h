@@ -1,5 +1,11 @@
-// TwsClient.h - TWS API EWrapper implementation
-// SCOPE: Producer thread - handles TWS callbacks, enqueues tick updates
+// TwsClient.h - TWS API bidirectional adapter
+// SCOPE: Manages TWS connection, subscriptions, and callbacks
+//
+// ARCHITECTURE CLARIFICATION:
+// - Inherits EWrapper (callback interface) - TWS pushes data TO us via callbacks
+// - Wraps EClientSocket (command interface) - WE send requests TO TWS
+// - Despite the name "EWrapper", it's a CALLBACK HANDLER, not a wrapper
+// - This class is the bridge between TWS API threading model and our lock-free queue
 
 #pragma once
 
@@ -17,24 +23,23 @@ class EClientSocket;
 
 namespace tws_bridge {
 
-// REASON: Inherits from TWS EWrapper to receive market data callbacks
+// Bidirectional TWS adapter: implements callbacks (EWrapper) + manages connection (EClientSocket)
 class TwsClient : public EWrapper {
 public:
     explicit TwsClient(moodycamel::ConcurrentQueue<TickUpdate>& queue);
     ~TwsClient() override;
 
-    // Connection management
+    // ========== Outbound API: Commands WE send TO TWS ==========
     bool connect(const std::string& host, unsigned int port, int clientId);
     void disconnect();
     bool isConnected() const;
-    
-    // Market data subscription
     void subscribeTickByTick(const std::string& symbol, int tickerId);
     
-    // Message processing loop (must be called from main thread)
+    // Message processing loop (dispatches callbacks from EReader thread)
     void processMessages();
 
-    // EWrapper interface - callbacks from TWS
+    // ========== Inbound API: Callbacks TWS invokes ON us (EWrapper interface) ==========
+    // These are called by EReader thread when TWS sends us data
     void tickPrice(TickerId tickerId, TickType field, double price, const TickAttrib& attribs) override;
     void tickSize(TickerId tickerId, TickType field, Decimal size) override;
     void tickString(TickerId tickerId, TickType tickType, const std::string& value) override;
@@ -49,8 +54,8 @@ public:
     void error(int id, time_t errorTime, int errorCode, const std::string& errorString, const std::string& advancedOrderRejectJson) override;
     void connectAck() override;
     
-    // REASON: Must implement all pure virtual methods from EWrapper
-    // These are minimally implemented for compilation
+    // ========== Unused EWrapper callbacks (stub implementations) ==========
+    // TWS API requires implementing 90+ callbacks, most unused for tick-by-tick
     void tickOptionComputation(TickerId /*tickerId*/, TickType /*tickType*/, int /*tickAttrib*/, double /*impliedVol*/, 
                                double /*delta*/, double /*optPrice*/, double /*pvDividend*/, double /*gamma*/, 
                                double /*vega*/, double /*theta*/, double /*undPrice*/) override {}
@@ -154,7 +159,7 @@ public:
     void userInfo(int /*reqId*/, const std::string& /*whiteBrandingId*/) override {}
     void currentTimeInMillis(time_t /*timeInMillis*/) override {}
 
-    // REASON: Protobuf methods (not used, but required by EWrapper)
+    // ========== Protobuf callbacks (unused) ==========
     void execDetailsProtoBuf(const protobuf::ExecutionDetails& /*executionDetailsProto*/) override {}
     void execDetailsEndProtoBuf(const protobuf::ExecutionDetailsEnd& /*executionDetailsEndProto*/) override {}
     void orderStatusProtoBuf(const protobuf::OrderStatus& /*orderStatusProto*/) override {}
@@ -163,18 +168,20 @@ public:
     void errorProtoBuf(const protobuf::ErrorMessage& /*errorProto*/) override {}
 
 private:
-    // REASON: Lock-free queue for zero-copy message passing to consumer thread
-    moodycamel::ConcurrentQueue<TickUpdate>& m_queue;
+    // ========== Data Flow: Callbacks → Queue → Redis Worker ==========
+    moodycamel::ConcurrentQueue<TickUpdate>& m_queue;  // Zero-copy enqueue from callbacks
     
-    std::unique_ptr<EReaderOSSignal> m_signal;
-    std::unique_ptr<EClientSocket> m_client;
-    std::unique_ptr<EReader> m_reader;
+    // ========== TWS API Components ==========
+    std::unique_ptr<EReaderOSSignal> m_signal;   // Thread synchronization primitive
+    std::unique_ptr<EClientSocket> m_client;     // Command interface (sends to TWS)
+    std::unique_ptr<EReader> m_reader;           // Socket reader thread (receives from TWS)
     
+    // ========== Connection State ==========
     std::atomic<bool> m_connected{false};
     std::atomic<OrderId> m_nextValidOrderId{0};
     
-    // REASON: Map tickerId to instrument symbol for routing
-    std::unordered_map<int, std::string> m_tickerToSymbol;
+    // ========== Symbol Routing ==========
+    std::unordered_map<int, std::string> m_tickerToSymbol;  // tickerId → symbol lookup
 };
 
 } // namespace tws_bridge

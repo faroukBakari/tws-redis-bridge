@@ -43,32 +43,65 @@ This design elevates the project from a "component" to a "platform enabler," whi
 
 To achieve low-latency, the system must be multi-threaded to isolate blocking I/O operations. A single-threaded design would stall on network calls, leading to unacceptable delays and data loss.
 
-The proposed architecture is a three-thread model (in addition to the EReader thread provided by the TWS API):
+The architecture uses a three-thread model:
 
 **TWS Gateway** → Delivers data over a TCP Socket.
 
-**Thread 1: EReader Thread (TWS API)** → This thread is created and managed by the TWS API when `EReader::start()` is called. Its sole responsibility is to block on the TCP socket, read raw bytes, parse the TWS message protocol, and place fully-formed `EMessage` objects onto an internal, thread-safe queue.
+#### Thread Architecture (matches implementation in `src/main.cpp`)
 
-**Thread 2: Message Processing Thread (Main Thread)** → This is the primary application thread. It runs an event loop that:
+**Thread 1: Main Thread (Message Processing)** 
+- **Created**: Implicit (program entry point at `main()`)
+- **Location**: `src/main.cpp` lines 149-159 (message processing loop)
+- **Responsibilities**:
+  1. Waits for signal from EReader's queue (`m_signal->waitForSignal()`)
+  2. Calls `client.processMessages()` which invokes `EReader::processMsgs()`
+  3. `processMsgs()` drains TWS API's internal queue and dispatches `EWrapper` callbacks **on this thread**
+  4. **Critical Path**: Callbacks (e.g., `tickByTickBidAsk()`) normalize data into `TickUpdate` struct
+  5. Enqueues `TickUpdate` to lock-free queue (non-blocking, < 1μs target)
+- **Key Insight**: This thread processes TWS messages at maximum speed, never blocking on I/O
 
-1. Waits for a signal from the EReader's queue (`EReaderOSSignal::waitForSignal()`).
-2. Calls `EReader::processMsgs()`. This function drains the internal queue and executes the corresponding `EWrapper` callback (e.g., `tickPrice()`) on this thread.
-3. **Critical Path**: The `tickPrice` callback normalizes the data into a C++ `MarketTick` struct.
+**[Lock-Free Queue]** (`moodycamel::ConcurrentQueue`) 
+- High-performance, lock-free SPSC (Single-Producer, Single-Consumer) queue
+- Handoff point between Thread 1 (producer) and Thread 2 (consumer)
+- Pre-allocated 10K slots (see `main.cpp` line 109)
 
-**[Lock-Free Queue]** (`moodycamel::ConcurrentQueue`) → The `MarketTick` struct is enqueued here. This is a high-performance, lock-free MPSC (Multi-Producer, Single-Consumer) queue. This handoff must be non-blocking.
+**Thread 2: Redis Worker Thread (Consumer)**
+- **Created**: `std::thread workerThread(...)` at `src/main.cpp` line 121
+- **Location**: `redisWorkerLoop()` function (`main.cpp` lines 24-83)
+- **Responsibilities**:
+  1. Blocks on dequeue from lock-free queue
+  2. When `TickUpdate` arrives, aggregates BidAsk + AllLast into `InstrumentState`
+  3. Serializes complete state to JSON using RapidJSON
+  4. Executes blocking `redis.publish()` call to Redis server
+- **Key Insight**: This thread handles all "slow" network I/O, isolated from critical ingestion path
 
-**Thread 3: Redis Publisher Thread** → This thread runs a simple loop:
+**Thread 3: EReader Thread (TWS API Internal)**
+- **Created**: `m_reader->start()` at `src/TwsClient.cpp` line 39 (inside `TwsClient::connect()`)
+- **Hidden**: Managed entirely by TWS API library (not visible in application code)
+- **Responsibilities**:
+  1. Blocks on TCP socket reading raw bytes from TWS Gateway
+  2. Parses TWS message protocol
+  3. Places fully-formed `EMessage` objects onto TWS API's internal queue
+  4. Signals Thread 1 via `EReaderOSSignal` when messages are ready
+- **Key Insight**: This thread is the "producer" for Thread 1's message processing loop
 
-1. **Blocks on dequeue**. It blocks (`wait_dequeue()`) on the lock-free queue.
-2. When a `MarketTick` struct arrives, it dequeues it.
-3. It serializes the struct into a compact JSON string.
-4. It executes the blocking network call (`PUBLISH`) to the Redis server.
+#### Data Flow Summary
 
-**Redis Pub/Sub** → Receives the JSON payload and broadcasts it to all subscribers on the channel (the "fan-out").
+```
+TWS Gateway
+    ↓ TCP Socket
+Thread 3 (EReader) - Socket I/O, parse messages
+    ↓ Internal Queue + Signal
+Thread 1 (Main) - Process messages, dispatch callbacks, enqueue
+    ↓ Lock-Free Queue (moodycamel)
+Thread 2 (Redis Worker) - Dequeue, aggregate, serialize, publish
+    ↓ Redis PUBLISH
+Redis Pub/Sub → Consumers (FastAPI, etc.)
+```
 
-**Consumers** → The FastAPI backend (via WebSockets), the data logger, etc.
+**Performance Design**: Thread 1 (Main) never blocks on network I/O; its only job is to process TWS messages and enqueue them, ensuring the TWS socket buffer is drained as fast as possible. Thread 2 (Redis Worker) handles all the "slow" network I/O, isolating that latency from the critical data-ingestion path.
 
-This model is efficient and robust. Thread 2 (Message Processing) never blocks on network I/O; its only job is to process TWS messages and enqueue them, ensuring the TWS socket buffer is drained as fast as possible. Thread 3 (Redis Publisher) handles all the "slow" network I/O, isolating that latency from the critical data-ingestion path.
+**Reference**: See `src/main.cpp` lines 149-155 for the thread architecture summary printed at startup.
 
 ## II. Deep Dive: TWS C++ API Integration (The 3-Day MVP Core)
 
@@ -76,27 +109,104 @@ This section directly addresses the primary challenge: integrating the native TW
 
 ### A. The EClient / EWrapper / EReader Triad: Demystifying the Model
 
-The TWS C++ API is built on an event-driven, object-oriented model that can be confusing. It is composed of three key components:
+The TWS C++ API is built on an event-driven, object-oriented model that can be confusing. It is composed of three key components that form a **bidirectional communication pattern**:
 
-- **`IBApi::EWrapper`**: An abstract interface (a pure virtual class). This defines how TWS communicates with the application. It is the "what I hear" component. The application must create a concrete class that inherits from `EWrapper` and implements its callback functions, such as `tickPrice()`, `error()`, and `nextValidId()`.
+#### Understanding the Misleading Nomenclature
 
-- **`IBApi::EClient`**: An abstract interface. This defines how the application communicates with TWS. It is the "what I say" component. It provides the methods for sending commands, such as `reqMktData()`, `placeOrder()`, and `eConnect()`.
+**⚠️ CRITICAL:** Despite its name, **`EWrapper` is NOT a wrapper** — it's a **callback interface** (Observer pattern). This is one of the most confusing aspects of the TWS API naming. A more accurate name would be `ITwsCallbacks` or `IEventHandler`.
 
-- **`IBApi::EClientSocket`**: The concrete implementation of `EClient` provided by Interactive Brokers. This class manages the actual TCP socket connection and message serialization.
+#### The Three Components
 
-- **`IBApi::EReader`**: The most critical and misunderstood component. This is not just a passive socket reader. It is an active object that runs on its own thread. As detailed in the architecture section, calling `EReader::start()` spawns a dedicated producer thread that reads from the socket and enqueues messages.
+- **`IBApi::EWrapper`** (Inbound API - Callbacks):
+  - An abstract interface (pure virtual class)
+  - **Role**: Defines callbacks that **TWS invokes on your application** when events occur
+  - **Direction**: TWS → Your Application (inbound data flow)
+  - **Example callbacks**: `tickByTickBidAsk()`, `error()`, `nextValidId()`
+  - Your application creates a concrete class (e.g., `TwsClient`) that inherits from `EWrapper` and implements these callbacks
 
-The core "secret" of the TWS C++ API is realizing that the `EReader` thread produces messages, but it does not process them. The application is responsible for creating a second thread (the "Message Processing Thread") that runs a loop. Inside this loop, it must wait for a signal from the EReader (`m_osSignal.waitForSignal()`) and then call `m_pReader->processMsgs()`.
+- **`IBApi::EClient`** (Outbound API - Commands):
+  - An abstract interface
+  - **Role**: Defines methods that **your application calls to send commands to TWS**
+  - **Direction**: Your Application → TWS (outbound requests)
+  - **Example methods**: `reqTickByTickData()`, `placeOrder()`, `eConnect()`
 
-The `processMsgs()` function is what drains the EReader's internal queue and, in turn, executes the `EWrapper` callbacks (like `tickPrice`) on the application's thread. This producer-consumer pattern is fundamental to the API's design.
+- **`IBApi::EClientSocket`**:
+  - The concrete implementation of `EClient` provided by Interactive Brokers
+  - Manages the actual TCP socket connection and message serialization
+  - Your application creates an instance and passes your `EWrapper` implementation to its constructor
+
+- **`IBApi::EReader`**:
+  - The most critical and misunderstood component
+  - **Not** just a passive socket reader — it's an active object that runs on its own thread
+  - Calling `EReader::start()` spawns a dedicated thread (Thread 3 in our architecture) that reads from the socket and enqueues messages
+  - See `src/TwsClient.cpp` line 39 where this thread is created
+
+#### The Bidirectional Architecture
+
+```
+Your Application (TwsClient)
+      ↑ callbacks      ↓ commands
+  EWrapper         EClientSocket
+      ↑                   ↓
+           TWS Gateway
+```
+
+**Key Insight**: `TwsClient` is a **bidirectional adapter**:
+- **Inherits** `EWrapper` to receive callbacks (inbound)
+- **Wraps** `EClientSocket` to send commands (outbound)
+
+See `include/TwsClient.h` lines 1-8 and 30-36 for the actual implementation demonstrating this separation.
+
+#### The Message Processing Pattern
+
+The core "secret" of the TWS C++ API is realizing that the `EReader` thread produces messages, but it does not process them. The application is responsible for running a message processing loop on the main thread (Thread 1). Inside this loop, it must:
+
+1. Wait for a signal from the EReader (`m_osSignal.waitForSignal()`)
+2. Call `m_pReader->processMsgs()`
+
+The `processMsgs()` function drains the EReader's internal queue and executes the corresponding `EWrapper` callbacks (like `tickByTickBidAsk`) **on the calling thread** (Thread 1). This producer-consumer pattern is fundamental to the API's design.
+
+**Reference**: See `src/main.cpp` lines 149-159 for the actual message processing loop implementation.
 
 ### B. Establishing the Connection: A Minimal TwsClient.h and main.cpp
 
-The following code provides a self-contained, robust client.
+The following code demonstrates the foundational patterns. For the complete, production implementation, see `include/TwsClient.h` and `src/TwsClient.cpp`.
+
+#### Understanding TwsClient as a Bidirectional Adapter
+
+**Key Architectural Insight**: `TwsClient` is **not** just a "client" — it's a **bidirectional adapter** that:
+
+1. **Implements `EWrapper` callbacks** (inbound API) - TWS pushes data to us
+2. **Wraps `EClientSocket`** (outbound API) - We send commands to TWS
+
+```cpp
+// Simplified architecture (see include/TwsClient.h for full implementation)
+class TwsClient : public EWrapper {  // Inherits callback interface
+private:
+    std::unique_ptr<EClientSocket> m_client;  // Wraps command interface
+    std::unique_ptr<EReader> m_reader;        // Manages Thread 3
+    
+public:
+    // ========== Outbound API: Commands WE send TO TWS ==========
+    bool connect(const std::string& host, unsigned int port, int clientId);
+    void subscribeTickByTick(const std::string& symbol, int tickerId);
+    void processMessages();  // Dispatches EWrapper callbacks on Thread 1
+    
+    // ========== Inbound API: Callbacks TWS invokes ON us ==========
+    void tickByTickBidAsk(...) override;  // Market data callback
+    void error(...) override;              // Error notification
+    void nextValidId(...) override;        // Connection confirmation
+    // ... 90+ other EWrapper callbacks (mostly stubs)
+};
+```
+
+**Production Implementation**: See `include/TwsClient.h` lines 1-8 for architecture clarification and lines 30-36 for the explicit separation of outbound vs inbound APIs.
 
 #### MarketTick.h (Internal Data Structure)
 
-This struct will hold the normalized L1 state and be passed between threads.
+This struct holds the normalized market data state and is passed between threads via the lock-free queue.
+
+**Note**: The actual production implementation uses `TickUpdate` and `InstrumentState` structures defined in `include/MarketData.h`.
 
 ```cpp
 #pragma once
@@ -105,7 +215,7 @@ This struct will hold the normalized L1 state and be passed between threads.
 
 struct MarketTick {
     long long tickerId = 0;
-    std::string symbol = ""; // We'll add this for easier routing
+    std::string symbol = ""; // For routing callbacks to instruments
     std::chrono::system_clock::time_point timestamp;
 
     double bid = 0.0, ask = 0.0, last = 0.0;
@@ -116,7 +226,7 @@ struct MarketTick {
 
 #### TwsClient.h (The Client Interface)
 
-This class encapsulates all TWS API logic.
+This class encapsulates all TWS API logic. The example below shows the foundational pattern; the production version includes modern C++17 features and comprehensive error handling.
 
 ```cpp
 #pragma once

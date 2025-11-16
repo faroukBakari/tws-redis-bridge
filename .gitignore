@@ -62,3 +62,4 @@ core.*
 third_party/
 external/
 **/__pycache__
+**/tmp

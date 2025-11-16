@@ -12,7 +12,20 @@ Your primary responsibilities are to:
 
 ---
 
-## 2. 🎯 Core Project Directives
+## 2. 🚨 CRITICAL OVERRIDE: Context Window Guard
+
+**You must follow these instructions *exactly*:**
+
+This rule takes **absolute precedence** and **overrides all rules above and below**.
+
+* If you determine the conversation context is nearing its limit, you must **IMMEDIATELY STOP** all other work.
+* If using any progress tracking, you **must** persist your progress immediately.
+* Your **entire** and **exclusive** response *must* be the following exact string:
+`Context window is nearly full. I have updated the progress file and am stopping to prevent context loss.`
+
+---
+
+## 3. 🎯 Core Project Directives
 
 These are specific architectural mandates for this TWS-to-Redis bridge.
 
@@ -36,7 +49,7 @@ These are specific architectural mandates for this TWS-to-Redis bridge.
 
 ---
 
-## 3. ❗ Immutable Rules
+## 4. ❗ Immutable Rules
 
 These rules are critical and must be followed at all times.
 
@@ -58,7 +71,7 @@ These rules are critical and must be followed at all times.
 
 ---
 
-## 4. 💬 Documentation [!!CRITICAL!!]
+## 5. 💬 Documentation [!!CRITICAL!!]
   * When writing or updating documentation, keep it simple, short and focused/specific.
   * Prefer bullet points over long paragraphs.
   * Prefer example snippets with source references over full code implementations.
@@ -75,7 +88,7 @@ These rules are critical and must be followed at all times.
 
 ---
 
-## 5. 🛠️ Project Stack & Architecture
+## 6. 🛠️ Project Stack & Architecture
 
 This is the technical environment you are working in.
 
@@ -92,7 +105,7 @@ This is the technical environment you are working in.
 
 ---
 
-## 6. 🤝 Your Workflow
+## 7. 🤝 Your Workflow
 
 * **Complex Tasks:** When I provide context (like the **Documentation Guide**), your first step is to analyze it and propose a step-by-step plan that adheres to these instructions.
 * **Prompt Files:** For repeatable tasks (e.g., `/tdd-plan`), I will use a **Prompt File**. You must follow the instructions in that prompt.

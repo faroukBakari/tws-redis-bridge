@@ -53,3 +53,134 @@ Option 3: Alternative broker API
 Consider using a broker with simpler API integration
 
 Next Step: Which approach would you like me to implement?
+
+---
+
+## Runtime Issues
+
+### Redis Connection Failures
+
+**Symptom:** Binary builds and runs but fails with error:
+```
+Connection refused (127.0.0.1:6379)
+```
+
+**Root Cause:** Redis container is not running
+
+**Solution:**
+1. Start Redis container:
+   ```bash
+   make docker-up
+   # OR
+   docker-compose up -d
+   ```
+
+2. Verify Redis is running:
+   ```bash
+   docker ps | grep redis
+   # Should show redis container with status "Up"
+   ```
+
+3. Test Redis connectivity:
+   ```bash
+   redis-cli PING
+   # Should return: PONG
+   ```
+
+4. If redis-cli not installed:
+   ```bash
+   docker exec -it $(docker ps -q -f name=redis) redis-cli PING
+   ```
+
+**Prevention:** Complete Validation Gate 1b before running the bridge. See `docs/FAIL-FAST-PLAN.md` § 2.1 (Day 1 Morning) for full dev environment setup requirements.
+
+---
+
+### Dev Environment Setup Issues
+
+**Issue 1: Missing docker-compose**
+
+**Symptom:**
+```
+bash: docker-compose: command not found
+```
+
+**Solution:**
+```bash
+# Ubuntu/Debian
+sudo apt-get install docker-compose
+
+# Or use Docker Compose V2 (built into Docker)
+docker compose up -d
+```
+
+---
+
+**Issue 2: Port 6379 Already in Use**
+
+**Symptom:**
+```
+Error starting userland proxy: listen tcp4 0.0.0.0:6379: bind: address already in use
+```
+
+**Solution:**
+1. Check what's using port 6379:
+   ```bash
+   sudo lsof -i :6379
+   # OR
+   sudo netstat -tulpn | grep 6379
+   ```
+
+2. If it's another Redis instance, stop it:
+   ```bash
+   sudo systemctl stop redis-server
+   # OR
+   sudo service redis-server stop
+   ```
+
+3. Or change port in `docker-compose.yml`:
+   ```yaml
+   ports:
+     - "6380:6379"  # Use 6380 on host
+   ```
+
+---
+
+**Issue 3: Docker Network Isolation**
+
+**Symptom:** Redis container runs but bridge can't connect
+
+**Solution:**
+1. Verify bridge is using correct Redis address:
+   ```bash
+   # In src/main.cpp, check RedisPublisher initialization
+   # Should be: RedisPublisher("redis://127.0.0.1:6379")
+   ```
+
+2. If running bridge in Docker, use container name instead:
+   ```cpp
+   RedisPublisher("redis://redis:6379")  // Use service name from docker-compose.yml
+   ```
+
+3. Test network connectivity:
+   ```bash
+   # From host
+   telnet 127.0.0.1 6379
+   
+   # Should connect and show Redis protocol
+   ```
+
+---
+
+### Validation Gate 1b Checklist
+
+Before proceeding to Day 1 Afternoon tasks (Gates 2a-2c), ensure:
+
+- [ ] `docker ps` shows Redis container running
+- [ ] `redis-cli PING` returns `PONG`
+- [ ] `make docker-logs` shows Redis startup logs
+- [ ] Bridge binary exists: `./build/tws_bridge`
+- [ ] Bridge can connect to Redis (run briefly, check logs)
+
+See `docs/FAIL-FAST-PLAN.md` § 2.1 for complete validation criteria.
+```

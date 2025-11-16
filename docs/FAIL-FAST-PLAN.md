@@ -10,6 +10,14 @@
 
 ## Progress Tracker
 
+**Gate Status Legend:**
+- ✅ **PASSED** - Gate completed successfully, validation evidence documented
+- ⏳ **IN PROGRESS** - Currently working on this gate, debugging/implementing
+- 🔴 **BLOCKED** - Waiting for previous gate to pass or external dependency
+- 🔴 **PENDING** - Not yet started, scheduled for future session
+
+---
+
 ### Day 1: Kill the Project or Prove It Works
 - [x] Morning: Environment Setup + TWS Connection
   - [x] Install TWS Gateway, enable API, verify port 7497 (User completed)
@@ -31,75 +39,98 @@
     - [x] Fixed installation script with `--no-check-certificate` flag
     - [x] Built library successfully: `vendor/IntelRDFPMathLib20U2/LIBRARY/libbid.a`
     - [x] Updated CMakeLists.txt to link Intel BID library
-  - [x] **✅ Validation Gate 1 PASSED:** Compile and link with TWS API
+  - [x] **✅ Validation Gate 1a PASSED:** Compile and link with TWS API
     - [x] All C++ code compiles without errors
     - [x] All tests pass (2/2 tests)
     - [x] Binary created: `build/tws_bridge` (4.0MB)
-- [ ] Afternoon: First Callback
-  - [ ] Implement EClient::eConnect(), EReader thread creation
-  - [ ] Implement nextValidId() callback
-  - [ ] Subscribe to tick-by-tick for one instrument (AAPL)
-  - [ ] **Validation Gate 2:** Receive tickByTickBidAsk() callback
-- [ ] Evening: Lock-Free Queue Spike
-  - [ ] Integrate moodycamel::ConcurrentQueue
-  - [ ] Benchmark enqueue/dequeue latency
-  - [ ] **Validation Gate 3:** Queue performance < 1μs
+  - [ ] **Validation Gate 1b:** Development Environment Setup
+    - [ ] Create Docker Compose with Redis container
+    - [ ] Add Makefile targets: `make dev-up`, `make dev-down`, `make dev-logs`
+    - [ ] Test Redis connectivity: `redis-cli PING`
+    - [ ] Document local development workflow
+- [ ] Afternoon: End-to-End Validation
+  - [ ] **⚠️ PIVOT:** Use historical bar data instead of tick-by-tick (markets closed)
+  - [ ] Implement `reqHistoricalData()` for one instrument (SPY)
+  - [ ] Implement `historicalData()` callback
+  - [ ] Test: Receive historical bars (5-minute bars, last 1 hour)
+  - [ ] **Validation Gate 2a:** Receive first historicalData() callback
+  - [ ] Implement simple queue enqueue in callback
+  - [ ] Implement consumer thread dequeue and console print
+  - [ ] **Validation Gate 2b:** Data flows TWS → Queue → Console
+  - [ ] Test Redis publish from consumer thread
+  - [ ] Verify with `redis-cli SUBSCRIBE "TWS:BARS:SPY"`
+  - [ ] **✅ Validation Gate 2c:** Complete end-to-end flow (TWS → Queue → Redis)
+- [ ] Evening: Lock-Free Queue + Real-Time Bar Updates
+  - [ ] Already integrated: moodycamel::ConcurrentQueue in main.cpp
+  - [ ] Subscribe to real-time bar updates: `reqRealTimeBars()`
+  - [ ] Implement `realtimeBar()` callback
+  - [ ] **Validation Gate 3a:** Real-time bars flow to Redis
+  - [ ] Benchmark queue enqueue/dequeue latency
+  - [ ] **Validation Gate 3b:** Queue performance < 1μs
 
-### Day 2: Thread Architecture + State Machine
-- [ ] Morning: Producer Thread (EWrapper Callbacks)
-  - [ ] Define TickUpdate struct, implement callbacks
-  - [ ] Enqueue TickUpdate in callbacks
-  - [ ] Add logging/metrics
-  - [ ] **Validation Gate 4:** Non-blocking callbacks
+### Day 2: Historical Tick Data + State Machine
+
+**[PIVOT]** Original plan targeted tick-by-tick during live market hours. Adjusted to historical ticks due to market closure. Architecture remains identical—only data source differs.
+
+- [ ] Morning: Historical Tick Data Testing (Market Closed Workaround)
+  - [ ] Implement reqHistoricalTicks() for bid/ask and last trades
+  - [ ] Implement historicalTicksBidAsk() and historicalTicksLast() callbacks
+  - [ ] Define TickUpdate struct, enqueue historical ticks
+  - [ ] **Validation Gate 4:** Historical tick data flows to queue
 - [ ] Afternoon: Consumer Thread + State Aggregation
   - [ ] Create RedisWorker class, implement workerLoop()
-  - [ ] Implement InstrumentState map, merge updates
-  - [ ] **Validation Gate 5:** Print complete snapshots
-- [ ] Evening: Multi-Instrument Test
-  - [ ] Subscribe to 3 instruments
-  - [ ] Verify state map routing
+  - [ ] Implement InstrumentState map, merge BidAsk + Last updates
+  - [ ] **Validation Gate 5:** Aggregate ticks and print snapshots
+- [ ] Evening: Prepare for Live Testing
+  - [ ] Document market hours testing strategy
+  - [ ] Add CLI flag: --mode=[historical|realtime]
+  - [ ] Update code for both reqHistoricalTicks() and reqTickByTickData()
 
-### Day 3: JSON Serialization + Redis Integration
+### Day 3: JSON Serialization + Performance Validation
 - [ ] Morning: JSON Serialization
-  - [ ] Implement serializeState() with RapidJSON
-  - [ ] Write unit tests (Catch2)
-  - [ ] Benchmark serialization
-  - [ ] **Validation Gate 6:** JSON schema validated
-- [ ] Afternoon: Redis Integration
-  - [ ] Start Redis Docker container
-  - [ ] Integrate redis-plus-plus, implement publish()
-  - [ ] Test with redis-cli SUBSCRIBE
-  - [ ] **Validation Gate 7:** Messages on Redis channels
-- [ ] Evening: Latency Measurement
-  - [ ] Add timestamps at each stage
-  - [ ] Measure end-to-end latency
+  - [ ] Implement serializeBarData() and serializeTickData() with RapidJSON
+  - [ ] Write unit tests (Catch2): validate JSON schema
+  - [ ] Benchmark serialization (target: 10-50μs per message)
+  - [ ] **Validation Gate 6:** JSON schema validated and performant
+- [ ] Afternoon: Redis Publish + Latency Measurement
+  - [ ] Already integrated: redis-plus-plus in code
+  - [ ] Refactor: Move Redis publish to consumer thread
+  - [ ] Add high-resolution timestamps (TWS → Queue → Serialize → Redis)
+  - [ ] **Validation Gate 7:** End-to-end latency < 50ms median
+- [ ] Evening: Multi-Instrument Test
+  - [ ] Subscribe to 3 instruments (SPY, QQQ, IWM)
+  - [ ] Verify state map routing by tickerId
+  - [ ] Test throughput with replay or historical data
+  - [ ] **Validation Gate 8:** Multi-instrument handling works
 
 ### Day 4: Error Handling + Reconnection
 - [ ] Morning: Error Code Mapping
-  - [ ] Implement error() callback with classification
-  - [ ] Test graceful shutdown
-  - [ ] Implement status publishing
-  - [ ] **Validation Gate 8:** Clean error handling
+  - [ ] Implement error() callback with classification (Fatal/Transient/Info)
+  - [ ] Test graceful shutdown (SIGINT/SIGTERM)
+  - [ ] Implement status publishing (TWS:STATUS channel)
+  - [ ] **Validation Gate 9:** Clean error handling and shutdown
 - [ ] Afternoon: Reconnection Logic
-  - [ ] Implement reconnection loop with backoff
-  - [ ] Clear stale state on disconnect
+  - [ ] Implement reconnection loop with exponential backoff (1s → 60s)
+  - [ ] Clear stale state on disconnect (m_instrumentStates.clear())
   - [ ] Resubscribe after reconnect
-  - [ ] **Validation Gate 9:** Auto-reconnect works
+  - [ ] **Validation Gate 10:** Auto-reconnect works after Gateway restart
 
-### Day 5: Testing + CLI Replay Mode
+### Day 5: Testing + Documentation
 - [ ] Morning: CLI Replay Utility
-  - [ ] Implement CSV parser
-  - [ ] Test replay mode
-  - [ ] **Validation Gate 10:** Offline testing works
+  - [ ] Implement CSV parser for tick data replay
+  - [ ] Add timestamp simulation with std::chrono
+  - [ ] **Validation Gate 11:** Offline testing works without TWS
 - [ ] Afternoon: Integration Tests + Benchmarking
-  - [ ] Write Docker Compose for Redis
-  - [ ] Run throughput test
-  - [ ] Profile with perf
-  - [ ] **Validation Gate 11:** Performance targets met
-- [ ] Evening: CI/CD Pipeline Skeleton
-  - [ ] Create .github/workflows/ci.yml
-  - [ ] Add unit tests to pipeline
-  - [ ] Configure Redis container
+  - [ ] Already have: Docker Compose for Redis
+  - [ ] Run throughput test with replay (target: > 10K msg/sec)
+  - [ ] Profile with perf, identify bottlenecks
+  - [ ] **Validation Gate 12:** Performance targets met
+- [ ] Evening: Documentation + CI/CD
+  - [ ] Update README with complete setup instructions
+  - [ ] Document dev workflow: make dev-up, make run, make dev-logs
+  - [ ] Create .github/workflows/ci.yml skeleton
+  - [ ] Add unit tests to CI pipeline
+  - [ ] **Final Gate:** All validation gates passed, MVP complete
 
 ---
 
@@ -160,109 +191,171 @@ This plan implements a **risk-first development strategy** where we tackle the h
 
 **Focus:** TWS API integration (the hardest unknown)
 
-#### Morning (4 hours): Environment Setup + TWS Connection
+#### Morning (4 hours): Environment Setup + TWS Compilation
 
 **Tasks:**
-1. **⏱ 30 min** - Install TWS Gateway, enable API, verify port 4002
+1. **⏱ 30 min** - Install TWS Gateway, enable API, verify port 7497
 2. **⏱ 1 hour** - Set up build system (Conan, CMake, basic `CMakeLists.txt`)
 3. **⏱ 1 hour** - Add TWS API to project (vendor or Conan)
 4. **⏱ 1.5 hours** - Write minimal `EWrapper` stub, link successfully
 
-**Validation Gate 1:** Can we compile a program that includes TWS API headers?
-- ✅ **Pass:** Proceed to afternoon
+**Validation Gate 1a:** Can we compile and link a program with TWS API?
+- ✅ **Pass:** Binary created, proceed to DevOps setup
 - ❌ **Fail:** TWS API is incompatible → pivot to REST API polling or abandon IB integration
 
-#### Afternoon (4 hours): First Callback
+**⚠️ STATUS:** **PASSED** - Binary builds successfully (4.0 MB)
+
+**Remaining Tasks for Gate 1b:**
+1. **⏱ 1 hour** - Create Docker Compose with Redis container
+2. **⏱ 30 min** - Add Makefile targets: `make dev-up`, `make dev-down`, `make dev-logs`
+3. **⏱ 15 min** - Test Redis connectivity: `redis-cli PING`
+4. **⏱ 15 min** - Document local development workflow in README
+
+**Validation Gate 1b:** Can we run the bridge with Redis in development mode?
+- ✅ **Pass:** Bridge connects to Redis, proceeds to afternoon
+- ❌ **Fail:** Redis connection issues → debug docker-compose networking
+
+#### Afternoon (4 hours): End-to-End Validation with Bar Data
+
+**⚠️ PIVOT DECISION:** Markets are closed (holiday). Use historical bar data instead of tick-by-tick.
+
+**Rationale:**
+- Historical bar data (`reqHistoricalData`) available 24/7
+- Real-time bars (`reqRealTimeBars`) work during off-hours for major indices
+- Can switch to tick-by-tick when markets open without architectural changes
 
 **Tasks:**
-1. **⏱ 2 hours** - Implement `EClient::eConnect()`, `EReader` thread creation
-2. **⏱ 1 hour** - Implement `nextValidId()` callback
-3. **⏱ 1 hour** - Subscribe to tick-by-tick for **one** instrument (AAPL)
+1. **⏱ 1.5 hours** - Implement `EClient::eConnect()`, `EReader` thread setup
+2. **⏱ 1 hour** - Implement `nextValidId()` and `historicalData()` callbacks
+3. **⏱ 1 hour** - Subscribe to historical bars: `reqHistoricalData("SPY", "1 D", "5 mins")`
+4. **⏱ 30 min** - Test: Console shows bar data (OHLCV)
 
-**Validation Gate 2:** Do we receive a `tickByTickBidAsk()` callback with real data?
-- ✅ **Pass:** Core integration works → proceed to Day 2
-- ❌ **Fail:** TWS API threading model misunderstood → read docs, pair program, extend timeline
+**Validation Gate 2a:** Do we receive `historicalData()` callbacks with bar data?
+- ✅ **Pass:** TWS connection works → proceed to queue integration
+- ❌ **Fail:** TWS API issues → extend timeline, consult TWS docs
 
-#### Evening (2 hours): Lock-Free Queue Spike
+**Tasks (Queue Integration):**
+1. **⏱ 1 hour** - Enqueue bar data in `historicalData()` callback
+2. **⏱ 1 hour** - Implement consumer thread dequeue and console print
+3. **⏱ 30 min** - Test: Data flows TWS → Queue → Console
+
+**Validation Gate 2b:** Does data flow through the producer-consumer pipeline?
+- ✅ **Pass:** Architecture works → proceed to Redis publish
+- ❌ **Fail:** Threading issues → debug, simplify architecture
+
+**Tasks (Redis Integration):**
+1. **⏱ 1 hour** - Implement Redis publish in consumer thread
+2. **⏱ 30 min** - Test: `redis-cli SUBSCRIBE "TWS:BARS:SPY"`
+3. **⏱ 15 min** - Verify JSON messages appear on channel
+
+**✅ Validation Gate 2c:** Complete end-to-end flow (TWS → Queue → Redis)?
+- ✅ **Pass:** MVP core validated → Day 2 ready
+- ❌ **Fail:** Critical blocker → stop, re-assess architecture
+
+#### Evening (2 hours): Real-Time Bars + Performance Baseline
 
 **Tasks:**
-1. **⏱ 1 hour** - Integrate `moodycamel::ConcurrentQueue`, write minimal producer/consumer
-2. **⏱ 1 hour** - Benchmark enqueue/dequeue latency (target: < 1μs)
+1. **⏱ 1 hour** - Subscribe to real-time bars: `reqRealTimeBars("SPY", 5, "TRADES")`
+2. **⏱ 30 min** - Implement `realtimeBar()` callback, test data flow
+3. **⏱ 30 min** - Benchmark queue enqueue/dequeue latency
 
-**Validation Gate 3:** Does lock-free queue meet performance targets?
+**Validation Gate 3a:** Do real-time bars flow to Redis during off-hours?
+- ✅ **Pass:** Real-time pipeline works → proceed
+- ⚠️ **Conditional:** Only historical works → acceptable for MVP, test live during market hours
+
+**Validation Gate 3b:** Does lock-free queue meet < 1μs performance target?
 - ✅ **Pass:** Architecture is sound → Day 2 ready
 - ❌ **Fail:** Queue too slow → investigate alternatives (folly, boost) or use `std::mutex`
 
 ---
 
-### 2.2. Day 2: Thread Architecture + State Machine
+### 2.2. Day 2: Historical Tick Data + State Machine
 
-**Objective:** Build the producer-consumer pipeline. Prove data flows from TWS → Queue → Console.
+**Objective:** Transition from bars to ticks, build state aggregation logic.
 
-**Focus:** Threading model (second hardest challenge)
+**Focus:** Historical tick data (market closed workaround) + state machine design
 
-#### Morning (4 hours): Producer Thread (EWrapper Callbacks)
+**⚠️ CONTEXT:** Markets are closed, so we use `reqHistoricalTicks()` instead of `reqTickByTickData()`. The architecture remains identical—only the data source changes.
+
+#### Morning (4 hours): Historical Tick Data Pipeline
 
 **Tasks:**
-1. **⏱ 2 hours** - Define `TickUpdate` struct, implement both callbacks (`BidAsk`, `AllLast`)
-2. **⏱ 1 hour** - Enqueue `TickUpdate` in callbacks (< 1μs, no I/O)
-3. **⏱ 1 hour** - Add logging/metrics (count enqueues, measure queue depth)
+1. **⏱ 2 hours** - Implement `reqHistoricalTicks()` for BidAsk and Last trades
+2. **⏱ 1 hour** - Implement `historicalTicksBidAsk()` and `historicalTicksLast()` callbacks
+3. **⏱ 1 hour** - Define `TickUpdate` struct with union for BidAsk/Last, enqueue ticks
 
-**Validation Gate 4:** Are callbacks enqueueing without blocking?
-- ✅ **Pass:** Critical path is non-blocking → proceed
-- ❌ **Fail:** Callbacks take > 1μs → profile, remove allocations, optimize
+**Validation Gate 4:** Can we receive historical tick data and enqueue it?
+- ✅ **Pass:** Historical tick pipeline works → proceed to aggregation
+- ❌ **Fail:** TWS API limits (1000 ticks max) → fallback to bar aggregation strategy
 
 #### Afternoon (4 hours): Consumer Thread + State Aggregation
 
 **Tasks:**
-1. **⏱ 2 hours** - Create `RedisWorker` class, implement `workerLoop()` dequeue logic
-2. **⏱ 2 hours** - Implement `InstrumentState` map, merge BidAsk + AllLast updates
+1. **⏱ 2 hours** - Refactor `RedisWorker` to dequeue `TickUpdate` (not bars)
+2. **⏱ 2 hours** - Implement `InstrumentState` map: merge BidAsk + Last into snapshots
+3. **⏱ 30 min** - Test: Console prints complete snapshots (bid/ask/last/volume)
 
-**Validation Gate 5:** Can we print complete market snapshots to console?
+**Validation Gate 5:** Can we aggregate ticks and print snapshots?
 - ✅ **Pass:** State machine works → Day 3 ready
 - ❌ **Fail:** State corruption or race conditions → add mutex, review design
 
-#### Evening (Optional): Multi-Instrument Test
+#### Evening (2 hours): Prepare for Live Market Testing
 
 **Tasks:**
-1. Subscribe to 3 instruments (AAPL, SPY, TSLA)
-2. Verify state map routes callbacks correctly by `tickerId`
+1. **⏱ 1 hour** - Document market hours testing strategy
+2. **⏱ 30 min** - Add CLI flag: `--mode=[historical|realtime]`
+3. **⏱ 30 min** - Prepare code to switch to `reqTickByTickData()` when markets open
+
+**Note:** We'll validate tick-by-tick subscriptions during market hours. For now, historical ticks prove the architecture.
 
 ---
 
-### 2.3. Day 3: JSON Serialization + Redis Integration
+### 2.3. Day 3: JSON Serialization + Performance Validation
 
-**Objective:** Replace console output with Redis publishing. First end-to-end test.
+**Objective:** Optimize serialization and measure end-to-end latency.
 
-**Focus:** RapidJSON performance + redis-plus-plus reliability
+**Focus:** RapidJSON performance + latency profiling
+
+**⚠️ NOTE:** Redis integration already done on Day 1. Focus here is optimization and measurement.
 
 #### Morning (3 hours): JSON Serialization
 
 **Tasks:**
-1. **⏱ 1.5 hours** - Implement `serializeState()` with RapidJSON Writer API
-2. **⏱ 1 hour** - Write unit tests (Catch2): validate JSON schema
+1. **⏱ 1.5 hours** - Implement `serializeBarData()` and `serializeTickData()` with RapidJSON Writer API
+2. **⏱ 1 hour** - Write unit tests (Catch2): validate JSON schema for both bar and tick formats
 3. **⏱ 30 min** - Benchmark serialization (target: 10-50μs per message)
 
 **Validation Gate 6:** Does JSON match the schema? Is it fast enough?
-- ✅ **Pass:** Serialization working → proceed
-- ❌ **Fail:** Too slow or incorrect schema → optimize RapidJSON usage
+- ✅ **Pass:** Serialization performant → proceed to latency measurement
+- ❌ **Fail:** Too slow (> 100μs) → optimize with buffer pooling or simplify schema
 
-#### Afternoon (4 hours): Redis Integration
-
-**Tasks:**
-1. **⏱ 1 hour** - Start Redis Docker container, test `redis-cli` connection
-2. **⏱ 2 hours** - Integrate `redis-plus-plus`, implement `publish()` in `RedisWorker`
-3. **⏱ 1 hour** - Test: Subscribe with `redis-cli SUBSCRIBE "TWS:TICKS:*"`
-
-**Validation Gate 7:** Are JSON messages appearing on Redis channels?
-- ✅ **Pass:** End-to-end pipeline works → Day 4 ready
-- ❌ **Fail:** Connection issues or publish failures → debug redis-plus-plus config
-
-#### Evening (1 hour): Latency Measurement
+#### Afternoon (4 hours): Latency Measurement + Optimization
 
 **Tasks:**
-1. Add high-resolution timestamps at each stage (TWS → Queue → Serialize → Redis)
-2. Measure end-to-end latency (target: < 50ms median)
+1. **⏱ 2 hours** - Add high-resolution timestamps at each stage:
+   - `t1`: TWS callback entry
+   - `t2`: Queue enqueue complete
+   - `t3`: Dequeue + state merge complete
+   - `t4`: JSON serialization complete
+   - `t5`: Redis publish complete
+2. **⏱ 1 hour** - Log latency histogram (p50, p95, p99)
+3. **⏱ 1 hour** - Optimize hot paths if needed (inline functions, reduce allocations)
+
+**Validation Gate 7:** Is end-to-end latency < 50ms (median)?
+- ✅ **Pass:** Performance acceptable → Day 4 ready
+- ⚠️ **Conditional:** 50-100ms → acceptable for MVP, document bottleneck
+- ❌ **Fail:** > 100ms → profile, identify bottleneck, optimize
+
+#### Evening (3 hours): Multi-Instrument Stress Test
+
+**Tasks:**
+1. **⏱ 1 hour** - Subscribe to 3 instruments (SPY, QQQ, IWM)
+2. **⏱ 1 hour** - Verify state map routing by `tickerId`, no cross-contamination
+3. **⏱ 1 hour** - Run replay or historical data stress test (10K+ updates)
+
+**Validation Gate 8:** Can the system handle multiple instruments concurrently?
+- ✅ **Pass:** Multi-instrument works → Day 4 ready
+- ❌ **Fail:** State corruption or dropped messages → add synchronization, review design
 
 ---
 
@@ -338,19 +431,30 @@ This plan implements a **risk-first development strategy** where we tackle the h
 
 Each validation gate has clear **pass/fail criteria**:
 
-| Gate | Criteria | Evidence | Owner |
-|------|----------|----------|-------|
-| **Gate 1** | TWS API compiles | Build log shows success | Developer |
-| **Gate 2** | First callback received | Console shows `tickByTickBidAsk()` log | Developer |
-| **Gate 3** | Queue performance | Benchmark: enqueue < 1μs | Developer |
-| **Gate 4** | Non-blocking callbacks | Profiler: callback time < 1μs | Developer |
-| **Gate 5** | State machine works | Console prints complete snapshots | Developer |
-| **Gate 6** | JSON schema valid | Unit test passes, benchmark < 50μs | Developer |
-| **Gate 7** | Redis publishes | `redis-cli` receives messages | Developer |
-| **Gate 8** | Error handling robust | Gateway restart: no crashes | Developer |
-| **Gate 9** | Reconnection works | Auto-reconnect after 1s, resume data | Developer |
-| **Gate 10** | Replay mode functional | Offline test produces expected output | Developer |
-| **Gate 11** | Performance targets met | Latency < 50ms, throughput > 10K/sec | Developer |
+| Gate | Criteria | Evidence | Status |
+|------|----------|----------|--------|
+| **Gate 1a** | TWS API compiles and links | Build log shows success, binary created | ✅ **PASSED** |
+| **Gate 1b** | Dev environment ready | Redis container runs, `make dev-up` works | ⏳ **IN PROGRESS** |
+| **Gate 2a** | First bar callback received | Console shows `historicalData()` log | 🔴 **BLOCKED** |
+| **Gate 2b** | Data flows to queue | TWS → Queue → Console prints bars | 🔴 **BLOCKED** |
+| **Gate 2c** | End-to-end to Redis | `redis-cli` receives bar messages | 🔴 **BLOCKED** |
+| **Gate 3a** | Real-time bars work | Real-time bar updates flow to Redis | 🔴 **PENDING** |
+| **Gate 3b** | Queue performance | Benchmark: enqueue < 1μs | 🔴 **PENDING** |
+| **Gate 4** | Historical ticks work | `historicalTicksBidAsk()` callback received | 🔴 **PENDING** |
+| **Gate 5** | State aggregation | Console prints merged bid/ask/last snapshots | 🔴 **PENDING** |
+| **Gate 6** | JSON schema valid | Unit tests pass, benchmark < 50μs | 🔴 **PENDING** |
+| **Gate 7** | Latency target met | End-to-end < 50ms (p50) | 🔴 **PENDING** |
+| **Gate 8** | Multi-instrument works | 3+ instruments, no state corruption | 🔴 **PENDING** |
+| **Gate 9** | Error handling robust | Gateway restart: graceful shutdown | 🔴 **PENDING** |
+| **Gate 10** | Reconnection works | Auto-reconnect after disconnect | 🔴 **PENDING** |
+| **Gate 11** | Replay mode functional | Offline test without TWS works | 🔴 **PENDING** |
+| **Gate 12** | Performance validated | Throughput > 10K msg/sec | 🔴 **PENDING** |
+
+**Legend:**
+- ✅ **PASSED** - Gate completed successfully
+- ⏳ **IN PROGRESS** - Currently working on this gate
+- 🔴 **BLOCKED** - Waiting for previous gate to pass
+- 🔴 **PENDING** - Not yet started
 
 ### 3.2. Decision Protocol
 
@@ -371,15 +475,28 @@ Each validation gate has clear **pass/fail criteria**:
 
 **Symptom:** Cannot receive callbacks or threading model is too complex
 
-**Fallback Strategy 1: Simplify to `reqMktData()`**
-- Use standard `tickPrice`/`tickSize` callbacks instead of tick-by-tick
-- **Trade-off:** Sampled data (250ms intervals) instead of true ticks
-- **Impact:** Acceptable for MVP, note limitation in docs
+**✅ ACTIVE (Day 1-2):** Markets closed, using historical/real-time bar data instead of tick-by-tick
 
-**Fallback Strategy 2: REST API Polling**
-- Use IB's REST API (if available) to poll for quotes every 1-5 seconds
-- **Trade-off:** Much higher latency, not real-time
-- **Impact:** MVP still functional but degraded performance
+**Implementation Status:**
+- **Gate 1a:** ✅ PASSED (compilation successful, binary created: 4.0 MB)
+- **Gate 1b:** ⏳ IN PROGRESS (Redis container setup - see § 5 Session 2 for blocker details)
+- **Next:** Gates 2a-2c (end-to-end bar flow validation once Gate 1b passes)
+
+**Fallback Strategy 1: Historical + Real-Time Bars (CURRENT)**
+- Use `reqHistoricalData()` for testing + `reqRealTimeBars()` for live updates
+- **Trade-off:** 5-second bar granularity instead of tick-by-tick
+- **Impact:** Acceptable for MVP, proves architecture, switch to ticks when markets open
+- **Reference:** See § 2.1 (Day 1 Afternoon) and DESIGN-DECISIONS.md § 2.1 (ADR-009)
+
+**Fallback Strategy 2: Historical Ticks (If bars insufficient)**
+- Use `reqHistoricalTicks()` for bid/ask and last trade data
+- **Trade-off:** Limited to 1000 ticks per request, requires pagination
+- **Impact:** Good for testing state aggregation logic offline
+
+**Fallback Strategy 3: Simplify to `reqMktData()` (Last resort)**
+- Use standard `tickPrice`/`tickSize` callbacks (sampled, not all ticks)
+- **Trade-off:** 250ms sampling, not true real-time
+- **Impact:** Acceptable for MVP, note limitation in docs
 
 ### 4.2. Lock-Free Queue Performance Failure
 
@@ -530,30 +647,42 @@ Each validation gate has clear **pass/fail criteria**:
 - `CMakeLists.txt` - Added `find_library(INTEL_BID_LIB)` and linked to `tws_api` target
 - `docs/FAIL-FAST-PLAN.md` - Progress tracking updated
 
-**✅ MILESTONE: Validation Gate 1 PASSED**
+**✅ MILESTONE: Validation Gate 1a PASSED**
 - ✅ All C++ code compiles without errors (0 warnings with `-Werror`)
 - ✅ Intel BID library linked successfully
 - ✅ All unit tests pass (2/2)
 - ✅ Binary created: `build/tws_bridge` (4.0 MB)
 - ⏱️ **Total Time:** ~4 hours from project start to successful build
 
+**⚠️ BLOCKER IDENTIFIED: Validation Gate 1b**
+- ❌ Binary fails at runtime: Redis connection refused (127.0.0.1:6379)
+- **Root Cause:** No Redis container running, missing DevOps setup
+- **Impact:** Cannot validate end-to-end flow (Gate 2a-2c)
+
 **Lessons Learned:**
 1. Always check vendor/source directories for official documentation first
 2. TWS API has hidden documentation files with critical build instructions
 3. Netlib.org mirrors Intel mathematical libraries (use HTTP mirror when HTTPS unavailable)
 4. CMake `find_library()` with `NO_DEFAULT_PATH` prevents system library conflicts
+5. **NEW:** Compilation success ≠ runtime validation. Need dev environment setup.
 
 **Next Steps:**
 1. ~~User downloads `IntelRDFPMathLib20U2.tar.gz` from Intel (manual step)~~ ✅ Automated
 2. ~~Place tarball in `vendor/` directory~~ ✅ Automated
 3. ~~Run `./vendor/install_intel_bid.sh` to build `libbid.a`~~ ✅ Complete
 4. ~~Run `make build` to complete linking~~ ✅ Complete
-5. ✅ **MILESTONE:** Validation Gate 1 **PASSED**
-6. **NEXT:** Continue Day 1 afternoon tasks:
+5. ✅ **MILESTONE:** Validation Gate 1a **PASSED** (Compilation)
+6. ⏳ **IN PROGRESS:** Validation Gate 1b (Dev Environment Setup):
+   - Create `docker-compose.yml` with Redis container
+   - Add Makefile targets: `make dev-up`, `make dev-down`, `make dev-logs`
+   - Test Redis connectivity
+   - Update README with local development workflow
+7. **NEXT:** Day 1 afternoon tasks (after Gate 1b passes):
+   - ⚠️ **PIVOT:** Use `reqHistoricalData()` instead of tick-by-tick (markets closed)
    - Implement `EClient::eConnect()` and `EReader` thread creation
-   - Implement `nextValidId()` callback
-   - Subscribe to tick-by-tick for **one** instrument (AAPL)
-   - **Target:** Pass Validation Gate 2 (receive first callback)
+   - Implement `nextValidId()` and `historicalData()` callbacks
+   - Subscribe to historical bars for **one** instrument (SPY)
+   - **Target:** Pass Validation Gate 2a-2c (end-to-end flow)
 
 **Files Modified:**
 - `/vendor/README.md` - Added TWS API v1037.02 version info
@@ -563,6 +692,47 @@ Each validation gate has clear **pass/fail criteria**:
 - `/CMakeLists.txt` - Added protobuf support, TWS API library
 - `/Makefile` - Fixed toolchain path for Conan 2.x layout
 - All source files created with complete implementation
+
+### Session 2 - November 16, 2025 (Plan Revision)
+
+**Progress:**
+- ✅ Identified Gate 1a vs Gate 1b distinction
+- ✅ Updated plan to split validation gates more granularly
+- ✅ Documented runtime blocker: Redis connection failure
+
+**Critical Insight:**
+- **Compilation ≠ Validation:** Binary builds successfully but fails at runtime
+- **Root Cause:** Missing DevOps infrastructure (Redis container, dev workflow)
+- **Impact:** All Day 1 afternoon tasks blocked until Gate 1b passes
+
+**Plan Updates:**
+1. **Gate 1 Split:** Now Gate 1a (compilation) + Gate 1b (dev environment)
+2. **Market Hours Pivot:** Changed all "tick-by-tick" to "historical/real-time bars"
+   - **Rationale:** Markets closed (holiday), tick-by-tick requires live trading
+   - **Strategy:** Use `reqHistoricalData()` + `reqRealTimeBars()` for testing
+   - **Impact:** Architecture identical, only data source changes
+3. **Gate Renumbering:** Updated all gates to reflect new validation steps (12 total)
+4. **Day 2 Refocus:** Now targets historical tick data (not live tick-by-tick)
+5. **Day 3 Refocus:** Redis already integrated, now focus on optimization/latency
+
+**New Gates Added:**
+- **Gate 1b:** Dev environment setup (Docker Compose, Makefile targets)
+- **Gate 2a:** First historical bar callback
+- **Gate 2b:** Data flows TWS → Queue → Console
+- **Gate 2c:** End-to-end flow TWS → Redis
+- **Gate 3a:** Real-time bars (5-second updates)
+- **Gate 3b:** Queue performance validation
+
+**Next Steps:**
+1. ⏳ **IMMEDIATE:** Complete Gate 1b (DevOps setup)
+   - Create `docker-compose.yml` with Redis service
+   - Add `make dev-up`, `make dev-down`, `make dev-logs` targets
+   - Document development workflow
+2. 🔴 **BLOCKED:** Cannot proceed to Day 1 afternoon until Redis is running
+3. **Post Gate 1b:** Implement TWS connection + historical bar subscription
+
+**Files Modified:**
+- `docs/FAIL-FAST-PLAN.md` - Complete plan revision with market hours pivot
 
 ---
 
@@ -583,17 +753,41 @@ Each validation gate has clear **pass/fail criteria**:
 
 ### 6.2. Critical Path Dependencies
 
+**Updated for 12-Gate Plan:**
+
 ```
-Day 1 Gate 1 → Gate 2 → Gate 3
-    ↓
-Day 2 Gate 4 → Gate 5
-    ↓
-Day 3 Gate 6 → Gate 7
-    ↓
-Day 4 Gate 8 → Gate 9
-    ↓
-Day 5 Gate 10 → Gate 11
+Day 1 Morning: Gate 1a (Compilation) ✅ PASSED
+         ↓
+Day 1 Morning: Gate 1b (Dev Environment) ⏳ IN PROGRESS
+         ↓
+Day 1 Afternoon: Gate 2a → 2b → 2c (End-to-End with Bars)
+         ↓
+Day 1 Evening: Gate 3a → 3b (Real-Time Bars + Queue Performance)
+         ↓
+Day 2 Morning: Gate 4 (Historical Ticks)
+         ↓
+Day 2 Afternoon: Gate 5 (State Aggregation)
+         ↓
+Day 3 Morning: Gate 6 (JSON Serialization)
+         ↓
+Day 3 Afternoon: Gate 7 (Latency Measurement)
+         ↓
+Day 3 Evening: Gate 8 (Multi-Instrument)
+         ↓
+Day 4 Morning: Gate 9 (Error Handling)
+         ↓
+Day 4 Afternoon: Gate 10 (Reconnection)
+         ↓
+Day 5 Morning: Gate 11 (Replay Mode)
+         ↓
+Day 5 Afternoon: Gate 12 (Performance Validation)
 ```
+
+**Critical Path Notes:**
+- **Gates 2a-2c** are the highest priority (end-to-end validation)
+- **Gate 1b** blocks all subsequent gates (dev environment required)
+- **Gates 3a-3b** can be partially parallelized with Gate 2 work
+- **Gates 6-8** focus on optimization, not blocking
 
 **Parallel Work Opportunities:**
 - JSON serialization (Day 3) can be tested independently with mock data
@@ -611,6 +805,11 @@ Day 5 Gate 10 → Gate 11
 | 2025-11-15 | Tick-by-tick required | True real-time data, not sampled | Architect |
 | 2025-11-15 | Lock-free queue mandatory | < 1μs critical path requirement | Architect |
 | 2025-11-15 | RapidJSON for MVP | Performance over convenience | Architect |
+| 2025-11-16 | **PIVOT:** Use bar data first | Markets closed (holiday), bars available 24/7 | Architect |
+| 2025-11-16 | Split Gate 1 into 1a/1b | Compilation ≠ Runtime validation | Architect |
+| 2025-11-16 | Add DevOps to Gate 1b | Docker Compose critical for testing | Architect |
+| 2025-11-16 | Expand to 12 gates | More granular validation checkpoints | Architect |
+| 2025-11-16 | Day 2 targets historical ticks | Fallback if markets remain closed | Architect |
 
 ---
 

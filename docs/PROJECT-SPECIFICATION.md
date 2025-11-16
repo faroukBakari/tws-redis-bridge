@@ -231,6 +231,34 @@ This specification defines the requirements, architecture, and technical design 
 
 **[REQUIRED]** External API interfaces:
 
+**[PIVOT]** **Market Hours Considerations:**
+
+The bridge supports multiple data subscription strategies to enable development and testing both during and outside market hours:
+
+**Primary Strategy (Markets Open - 9:30 AM - 4:00 PM ET):**
+- Use `reqTickByTickData()` for true tick-level market data
+- Callbacks: `tickByTickBidAsk` (quotes) and `tickByTickAllLast` (trades)
+- **Granularity:** Every market event triggers immediate callback
+- **Use Case:** Production trading, live market analysis
+
+**Fallback Strategy 1 (Markets Closed - Development/Testing):**
+- Use `reqHistoricalData()` for historical bar data (5-minute OHLCV bars, last 1-24 hours)
+- Use `reqRealTimeBars()` for 5-second real-time bars (available 24/7 for major indices)
+- **Granularity:** 5-second to 5-minute intervals
+- **Use Case:** Architecture validation, offline development, testing without live market dependency
+- **Impact:** Validates producer-consumer pipeline, state management, and Redis publishing without requiring market hours
+- **Reference:** See `docs/FAIL-FAST-PLAN.md` § 2.1 (Day 1 Afternoon) for bar-based testing approach
+
+**Fallback Strategy 2 (Historical Tick Data - Testing):**
+- Use `reqHistoricalTicks()` for BidAsk and Last trade data
+- **Limitation:** 1000 ticks per request (requires pagination for larger datasets)
+- **Use Case:** Testing tick aggregation logic offline
+- **Reference:** See `docs/FAIL-FAST-PLAN.md` § 2.2 (Day 2 Morning) for historical tick testing
+
+**Architecture Note:** The producer-consumer threading model remains identical across all data sources—only the subscription method and callback signatures change. State aggregation, JSON serialization, and Redis publishing logic are data-source agnostic.
+
+---
+
 **TWS C++ API (Input):**
 - **Connection:** `EClient::eConnect(host, port, clientId)`
 - **Subscription:** `EClient::reqTickByTickData(reqId, contract, "BidAsk"|"AllLast", 0, false)`
@@ -1050,43 +1078,43 @@ services:
 
 **[ARCHITECTURE]** **Fixed Three-Thread Design:**
 
-| Thread | Lifecycle | Responsibilities | Performance |
-|--------|-----------|------------------|-------------|
-| **1: EReader** | TWS API managed | Block on socket, parse TWS protocol, enqueue messages | I/O bound |
-| **2: Main/Producer** | App main thread | Wait on signal, execute callbacks, enqueue `TickUpdate` | **< 1μs per callback** |
-| **3: Redis Worker** | Created in `main()` | Dequeue, update state (mutex), serialize JSON, publish | > 10K msg/sec |
+| Thread | Created | Location | Responsibilities | Performance |
+|--------|---------|----------|------------------|-------------|
+| **1: Main** | Implicit (entry point) | `main()` at src/main.cpp:88 | Wait on signal, dispatch callbacks, enqueue `TickUpdate` | **< 1μs per callback** |
+| **2: Redis Worker** | `std::thread` | `main.cpp:121` | Dequeue, aggregate state, serialize JSON, publish | > 10K msg/sec |
+| **3: EReader** | TWS API internal | `TwsClient.cpp:39` | Block on socket, parse TWS protocol, enqueue messages | I/O bound |
 
+**[IMPORTANT]** Thread numbering matches implementation. Reference `src/main.cpp` lines 149-155 for runtime thread architecture documentation.
 
-#### Thread 1: EReader (TWS API Managed)
+#### Thread Creation Points
+
+**Thread 1 (Main Thread):**
+- **Created**: Implicit (program entry point)
+- **Entry Function**: `int main()` at `src/main.cpp` line 88
+- **Purpose**: Runs message processing loop that dispatches EWrapper callbacks
+
+**Thread 2 (Redis Worker):**
+- **Created**: `std::thread workerThread(...)` at `src/main.cpp` line 121
+- **Entry Function**: `redisWorkerLoop()` at `src/main.cpp` lines 24-83
+- **Purpose**: Consumes tick updates, aggregates state, publishes to Redis
+
+**Thread 3 (EReader - TWS Internal):**
+- **Created**: `m_reader->start()` at `src/TwsClient.cpp` line 39 (inside `TwsClient::connect()`)
+- **Entry Function**: Hidden inside TWS library (not visible in application code)
+- **Purpose**: Socket I/O, TWS protocol parsing, signaling Thread 1
+
+#### Thread 1: Main Thread (Message Processing)
 
 **Lifecycle:**
-- Created by `EReader::start()` (TWS API internal)
-- Runs until `EClient::eDisconnect()` called
+- Application main thread (implicit creation at program start)
+- Runs message processing loop at `src/main.cpp` lines 149-159 until disconnect
 
 **Responsibilities:**
-- Block on TCP socket: `read()` system call
-- Parse TWS binary protocol
-- Create `EMessage` objects
-- Enqueue to internal thread-safe queue
-- Signal main thread: `m_osSignal.issueSignal()`
-
-**Performance Characteristics:**
-- I/O bound (blocks on socket)
-- Minimal CPU usage (protocol parsing only)
-- No application code runs on this thread
-
-#### Thread 2: Message Processing (Main Thread)
-
-**Lifecycle:**
-- Application main thread
-- Runs `runMessageLoop()` until disconnect
-
-**Responsibilities:**
-- Wait for signal: `m_osSignal.waitForSignal()` (futex, ~1-10μs)
-- Dequeue TWS messages: `m_pReader->processMsgs()`
-- Execute EWrapper callbacks (application code)
-- Copy data to `TickUpdate` struct
-- Enqueue: `g_tickQueue.enqueue(update)` (lock-free, 50-200ns)
+- Wait for signal: `m_signal->waitForSignal()` (futex, ~1-10μs)
+- Call `client.processMessages()` which invokes `m_pReader->processMsgs()`
+- **processMsgs() dispatches EWrapper callbacks ON THIS THREAD** (Thread 1)
+- Callbacks (e.g., `tickByTickBidAsk()`) copy data to `TickUpdate` struct
+- Enqueue: `m_queue.try_enqueue(update)` (lock-free, 50-200ns)
 
 **[CRITICAL]** **Performance Constraints:**
 - **Target:** < 1μs per callback
@@ -1094,78 +1122,108 @@ services:
 - **[ANTI-PATTERN]** No mutex locks (critical path)
 - **[REQUIRED]** Just copy data and enqueue
 
-**Code Pattern:**
+**Code Pattern** (see `src/TwsClient.cpp` lines 119-140):
 ```cpp
-void MyWrapper::tickByTickBidAsk(int reqId, long time, 
+void TwsClient::tickByTickBidAsk(int reqId, time_t time, 
                                   double bidPrice, double askPrice,
-                                  int bidSize, int askSize, ...) {
+                                  Decimal bidSize, Decimal askSize, ...) {
+    // CRITICAL PATH: Construct update on stack, enqueue without heap allocation
     TickUpdate update;
     update.tickerId = reqId;
     update.type = TickUpdateType::BidAsk;
-    update.timestamp = time; // [CRITICAL] Use TWS time
+    update.timestamp = time * 1000; // Convert to milliseconds
     update.bidPrice = bidPrice;
     update.askPrice = askPrice;
-    update.bidSize = bidSize;
-    update.askSize = askSize;
+    update.bidSize = static_cast<int>(bidSize);
+    update.askSize = static_cast<int>(askSize);
     
-    g_tickQueue.enqueue(update); // Lock-free, non-blocking
-    // [ANTI-PATTERN] No Redis, no logging, no state updates here
+    // CRITICAL: Non-blocking enqueue, target < 1μs
+    if (!m_queue.try_enqueue(update)) {
+        std::cerr << "[TWS] Queue full! Dropping update\n";
+    }
 }
 ```
 
-#### Thread 3: Redis Worker (Consumer Thread)
+#### Thread 2: Redis Worker (Consumer Thread)
 
 **Lifecycle:**
-- Created in `main()` before TWS connection
-- Runs until `m_running.store(false)` signaled
-- Joined on graceful shutdown
+- Created in `main()` before TWS connection at `src/main.cpp` line 121
+- Entry function: `redisWorkerLoop()` at `src/main.cpp` lines 24-83
+- Runs until `g_running.store(false)` signaled
+- Joined on graceful shutdown at `main.cpp` line 166
 
 **Responsibilities:**
-- Blocking wait: `g_tickQueue.wait_dequeue_timed(update, 100ms)`
-- State update: Lock `m_stateMutex`, update `m_instrumentStates[tickerId]`
+- Non-blocking dequeue: `queue.try_dequeue(update)` with sleep fallback
+- State aggregation: Merge BidAsk + AllLast updates into `InstrumentState` (no mutex in MVP)
 - Serialize: `serializeState(state)` → JSON string (RapidJSON)
-- Publish: `m_redis->publish(channel, json)` (blocking network I/O)
+- Publish: `redis.publish(channel, json)` (blocking network I/O - acceptable here)
 
 **Performance Characteristics:**
 - Target: > 10,000 messages/second
 - Latency: 1-2ms per message (acceptable, off critical path)
-- Blocking I/O isolated from EReader/callbacks
+- Blocking I/O isolated from Thread 1 callbacks
 
-**Code Pattern:**
+**Code Pattern** (see `src/main.cpp` lines 34-77):
 ```cpp
-void RedisWorker::workerLoop() {
+void redisWorkerLoop(ConcurrentQueue<TickUpdate>& queue, 
+                     RedisPublisher& redis,
+                     std::atomic<bool>& running) {
+    std::unordered_map<std::string, InstrumentState> stateMap;
     TickUpdate update;
-    while (m_running.load()) {
-        if (g_tickQueue.wait_dequeue_timed(update, 100ms)) {
-            std::string json;
-            {
-                std::lock_guard<std::mutex> lock(m_stateMutex);
-                InstrumentState& state = m_instrumentStates[update.tickerId];
-                
-                // Update partial state
-                if (update.type == TickUpdateType::BidAsk) {
-                    state.bidPrice = update.bidPrice;
-                    state.askPrice = update.askPrice;
-                    // ... update other fields
-                }
-                
-                json = serializeState(state); // Complete snapshot
+    
+    while (running.load()) {
+        if (queue.try_dequeue(update)) {
+            // Route by tickerId to symbol (temporary hardcoded mapping)
+            std::string symbol = getSymbolFromTickerId(update.tickerId);
+            
+            // Aggregate BidAsk + AllLast into complete state
+            auto& state = stateMap[symbol];
+            if (update.type == TickUpdateType::BidAsk) {
+                state.bidPrice = update.bidPrice;
+                state.askPrice = update.askPrice;
+                // ... update fields
+                state.hasQuote = true;
             }
             
-            std::string channel = "TWS:TICKS:" + state.symbol;
-            m_redis->publish(channel, json); // Blocking I/O OK here
+            // Publish only when we have complete snapshot (BidAsk AND AllLast)
+            if (state.hasQuote && state.hasTrade) {
+                std::string json = serializeState(state);
+                std::string channel = "TWS:TICKS:" + symbol;
+                redis.publish(channel, json); // Blocking I/O OK here
+            }
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
     }
 }
 ```
 
+#### Thread 3: EReader (TWS API Internal)
+
+**Lifecycle:**
+- Created by `m_reader->start()` at `src/TwsClient.cpp` line 39
+- Managed entirely by TWS API library
+- Runs until `eDisconnect()` called
+
+**Responsibilities:**
+- Block on TCP socket: `read()` system call
+- Parse TWS binary protocol
+- Create `EMessage` objects
+- Enqueue to TWS API's internal thread-safe queue
+- Signal Thread 1: `m_osSignal->issueSignal()`
+
+**Performance Characteristics:**
+- I/O bound (blocks on socket)
+- Minimal CPU usage (protocol parsing only)
+- **No application code runs on this thread** - completely managed by TWS library
+
 **Thread Synchronization:**
 
-| Resource | Mechanism | Threads | Performance |
-|----------|-----------|---------|-------------|
-| `g_tickQueue` | Lock-free atomic | 2 → 3 | 50-200ns |
-| `m_instrumentStates` | `std::mutex` | 3 only | 1-10μs |
-| `m_running` | `std::atomic<bool>` | main, 3 | ~1ns |
+| Resource | Mechanism | Threads | Performance | Location |
+|----------|-----------|---------|-------------|----------|
+| `m_queue` (lock-free) | Atomic operations | 1 → 2 | 50-200ns | Passed to TwsClient |
+| `m_signal` | EReaderOSSignal | 3 → 1 | ~1-10μs | TWS API internal |
+| `g_running` | `std::atomic<bool>` | main, 2 | ~1ns | main.cpp:17 |
 
 ### 4.3. Memory Management
 
@@ -1296,18 +1354,84 @@ void clearState() {
 
 <!-- METADATA: scope=tws-api, priority=critical, dependencies=[4.2-threading, 5.2-data-processing] -->
 
+#### Understanding TWS API Naming Confusion
+
+**[IMPORTANT]** The TWS API has **misleading naming** that confuses developers:
+
+**EWrapper is NOT a Wrapper!**
+- **What it actually is**: A **callback interface** defining methods TWS invokes when messages arrive
+- **Misleading name**: "Wrapper" implies it wraps something (it doesn't)
+- **Correct mental model**: Think "ECallbackInterface" or "EMessageHandler"
+- **Implementation**: `TwsClient` inherits from `EWrapper` to receive callbacks
+
+**TwsClient IS the Actual Bidirectional Adapter:**
+- **Inbound Communication**: Implements `EWrapper` callbacks (TWS → Application)
+  - TWS calls our methods: `tickByTickBidAsk()`, `tickByTickAllLast()`, `error()`, etc.
+  - See `include/TwsClient.h` lines 1-8 for architecture clarification
+- **Outbound Communication**: Wraps `EClientSocket` (Application → TWS)
+  - We call TWS methods: `eConnect()`, `reqTickByTickData()`, etc.
+  - Abstraction layer hiding TWS API complexity
+
+**Architectural Layers (Highest to Lowest):**
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   APPLICATION CODE                          │
+│                      TwsClient                              │
+│                  (Bidirectional Adapter)                    │
+│                         |                                   │
+│              implements (inbound)                           │
+│                         ↓                                   │
+│                    EWrapper (callback interface)            │
+│                  - tickByTickBidAsk()                       │
+│                  - tickByTickAllLast()                      │
+│                  - error()                                  │
+│                  - nextValidId()                            │
+│                  - [90+ callback methods]                   │
+│                                                             │
+│              wraps (outbound)                               │
+│                         ↓                                   │
+│                  EClientSocket (command interface)          │
+│                  - reqTickByTickData()                      │
+│                  - eConnect()                               │
+│                  - eDisconnect()                            │
+└─────────────────────────────────────────────────────────────┘
+                         ↑ callbacks
+                         | (Thread 1 - Main)
+┌────────────────────────┴─────────────────────────────────────┐
+│                   TWS API LIBRARY                            │
+│                                                              │
+│   EReader (Thread 3)            EClientSocket                │
+│   - reads socket         ←───→  - sends requests            │
+│   - decodes messages            - manages connection        │
+│   - dispatches callbacks        [outbound commands]         │
+│   [inbound events]                                          │
+└──────────────────────────────────────────────────────────────┘
+                         ↕
+                    TCP Socket
+                         ↕
+┌──────────────────────────────────────────────────────────────┐
+│                    TWS Gateway / IB Servers                  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Key Points:**
+- **EWrapper**: Misleadingly named - it's a **callback interface**, not a wrapper
+- **TwsClient**: The actual adapter - implements EWrapper (inbound) + wraps EClientSocket (outbound)
+- **Thread 1 (Main)**: Where EWrapper callbacks execute after EReader dispatches them
+- **Thread 3 (EReader)**: Internal to TWS API, handles socket I/O and message parsing
+
 **[CRITICAL]** **Use `reqTickByTickData()` (not `reqMktData()`)** - true tick-level data, no sampling
 
 **Connection Pattern:**
 ```cpp
 // 1. Create components
-TwsClient wrapper;
-EClientSocket client(&wrapper, &signal);
+TwsClient wrapper; // [MISLEADING NAME] Actually a bidirectional adapter
+EClientSocket client(&wrapper, &signal); // Pass "this" for callbacks
 EReader reader(&client, &signal);
 
 // 2. Connect & start reader
 client.eConnect(host, port, clientId);
-reader.start(); // Spawns Thread 1
+reader.start(); // Spawns Thread 3 (EReader internal)
 
 // 3. Wait for nextValidId() callback (connection handshake complete)
 // 4. Subscribe: client.reqTickByTickData(tickerId, contract, "BidAsk"|"AllLast", 0, false)
@@ -1323,18 +1447,19 @@ c.exchange = "SMART";
 c.primaryExchange = "NASDAQ"; // Required for disambiguation
 ```
 
-**Callbacks to Implement:**
+**Callbacks to Implement (Inbound API):**
 - `nextValidId()` - Connection ready, start subscriptions
-- `tickByTickBidAsk()` - Quote updates (bid/ask price/size)
-- `tickByTickAllLast()` - Trade updates (last price/size)
-- `error()` - Error handling with code mapping
-- `connectionClosed()` - Clear state, trigger reconnect
+- `tickByTickBidAsk()` - Quote updates (bid/ask price/size) - **executes on Thread 1**
+- `tickByTickAllLast()` - Trade updates (last price/size) - **executes on Thread 1**
+- `error()` - Error handling with code mapping - **executes on Thread 1**
+- `connectionClosed()` - Clear state, trigger reconnect - **executes on Thread 1**
 
 **[PITFALL]** Common Mistakes:
 - Subscribing before `nextValidId()` callback (requests ignored)
 - Using `std::time(nullptr)` instead of TWS `time` parameter
 - Blocking in callbacks (kills performance)
 - Missing `primaryExchange` (ambiguous symbols)
+- Thinking "EWrapper" wraps something (it doesn't - it's a callback interface)
 
 ### 5.2. Data Processing
 
@@ -1730,6 +1855,45 @@ TEST_CASE("State aggregates BidAsk and AllLast updates", "[state]") {
 | **CI/CD** | Automated pipeline | All tests pass on commit |
 | | Reproducible builds | Conan lockfiles |
 
+#### Validation Gates
+
+**[ACCEPTANCE]** **Progressive Validation Strategy:**
+
+The project uses a fail-fast approach with 12 validation gates that must pass sequentially. Each gate validates a critical assumption before proceeding to the next phase.
+
+| Gate | Criteria | Evidence | Status |
+|------|----------|----------|--------|
+| **Gate 1a** | TWS API compiles and links | Build log shows success, binary created | ✅ **PASSED** |
+| **Gate 1b** | Dev environment ready | Redis container runs, `make dev-up` works | ⏳ **IN PROGRESS** |
+| **Gate 2a** | First bar callback received | Console shows `historicalData()` log | 🔴 **BLOCKED** |
+| **Gate 2b** | Data flows to queue | TWS → Queue → Console prints bars | 🔴 **BLOCKED** |
+| **Gate 2c** | End-to-end to Redis | `redis-cli` receives bar messages | 🔴 **BLOCKED** |
+| **Gate 3a** | Real-time bars work | Real-time bar updates flow to Redis | 🔴 **PENDING** |
+| **Gate 3b** | Queue performance | Benchmark: enqueue < 1μs | 🔴 **PENDING** |
+| **Gate 4** | Historical ticks work | `historicalTicksBidAsk()` callback received | 🔴 **PENDING** |
+| **Gate 5** | State aggregation | Console prints merged bid/ask/last snapshots | 🔴 **PENDING** |
+| **Gate 6** | JSON schema valid | Unit tests pass, benchmark < 50μs | 🔴 **PENDING** |
+| **Gate 7** | Latency target met | End-to-end < 50ms (p50) | 🔴 **PENDING** |
+| **Gate 8** | Multi-instrument works | 3+ instruments, no state corruption | 🔴 **PENDING** |
+| **Gate 9** | Error handling robust | Gateway restart: graceful shutdown | 🔴 **PENDING** |
+| **Gate 10** | Reconnection works | Auto-reconnect after disconnect | 🔴 **PENDING** |
+| **Gate 11** | Replay mode functional | Offline test without TWS works | 🔴 **PENDING** |
+| **Gate 12** | Performance validated | Throughput > 10K msg/sec | 🔴 **PENDING** |
+
+**Legend:**
+- ✅ **PASSED** - Gate completed successfully, evidence documented
+- ⏳ **IN PROGRESS** - Currently working on this gate, debugging/implementing
+- 🔴 **BLOCKED** - Waiting for previous gate to pass or external dependency
+- 🔴 **PENDING** - Not yet started, scheduled for future session
+
+**Decision Protocol at Each Gate:**
+1. **✅ PASS:** Document result, commit code, proceed to next phase
+2. **⚠️ CONDITIONAL PASS:** Works but needs optimization → add tech debt ticket, proceed
+3. **❌ FAIL:** Stop, diagnose root cause, decide: Fix (extend timeline), Pivot (simplify design), or Abort (acknowledge blocker)
+
+**Reference:** See `docs/FAIL-FAST-PLAN.md` § 3 for detailed gate criteria, validation procedures, and contingency plans.
+
+
 ### 7.5. Test Utilities
 
 <!-- METADATA: scope=test-tools, priority=medium, dependencies=[5.2-data-processing, 7.2-integration-testing] -->
@@ -1974,22 +2138,58 @@ redis-cli SUBSCRIBE "TWS:TICKS:AAPL"
 
 #### C.1. Threading Model Cheat Sheet
 
-| Thread | Managed By | Purpose | Critical Path | Performance Target | Key Constraints |
-|--------|-----------|---------|---------------|-------------------|-----------------|
-| **Thread 1: EReader** | TWS API | Read TCP socket, parse TWS protocol | No | I/O bound | Don't modify (TWS managed) |
-| **Thread 2: Main** | Application | Process callbacks, enqueue `TickUpdate` | **YES** | **< 1μs per callback** | NO I/O, NO mutex locks |
-| **Thread 3: Redis Worker** | Application | Dequeue, update state, serialize, publish | No | > 10K msg/sec | Blocking I/O OK |
+| Thread | Managed By | Creation Point | Purpose | Critical Path | Performance Target | Context |
+|--------|-----------|----------------|---------|---------------|-------------------|---------|
+| **Thread 1: Main** | Application | Implicit (entry point) | Process callbacks, enqueue `TickUpdate` | **YES** | **< 1μs per callback** | EWrapper callbacks execute here |
+| **Thread 2: Redis Worker** | Application | `main.cpp:121` | Dequeue, update state, serialize, publish | No | > 10K msg/sec | Blocking I/O OK |
+| **Thread 3: EReader** | TWS API | `TwsClient.cpp:39` | Read TCP socket, parse TWS protocol | No | I/O bound | Don't modify (TWS managed) |
+
+**Creation Locations:**
+- **Thread 1**: Implicit at `int main()` entry point (`src/main.cpp` line 88)
+- **Thread 2**: `std::thread workerThread(...)` at `src/main.cpp` line 121
+- **Thread 3**: `m_reader->start()` inside `TwsClient::connect()` at `src/TwsClient.cpp` line 39
 
 **Inter-Thread Communication:**
-- **Thread 1 → Thread 2:** `EReaderOSSignal` (TWS internal futex)
-- **Thread 2 → Thread 3:** `moodycamel::ConcurrentQueue` (lock-free, 50-200ns)
+- **Thread 3 → Thread 1:** `EReaderOSSignal` (TWS internal futex, ~1-10μs)
+- **Thread 1 → Thread 2:** `moodycamel::ConcurrentQueue` (lock-free, 50-200ns)
 
 **Synchronization:**
-- `g_tickQueue` - Lock-free atomic (Threads 2 → 3)
-- `m_instrumentStates` - `std::mutex` (Thread 3 exclusive)
-- `m_running` - `std::atomic<bool>` (main, Thread 3)
+- `m_queue` - Lock-free atomic (Threads 1 → 2)
+- `stateMap` - No mutex in MVP (Thread 2 exclusive)
+- `g_running` - `std::atomic<bool>` (main, Thread 2)
 
-#### C.2. TWS Error Code Quick Reference
+#### C.2. TWS API Communication Model
+
+**Bidirectional Pattern:**
+```
+Application
+    ↕
+TwsClient (Bidirectional Adapter)
+    ↓ implements (Inbound)         ↑ wraps (Outbound)
+EWrapper (callbacks)            EClientSocket (commands)
+    ↖ dispatched by            ↗ sends requests to
+         EReader (Thread 3)
+                 ↕
+            TCP Socket
+```
+
+**Inbound Communication (TWS → Application):**
+- **Interface**: `EWrapper` (misleadingly named - it's a callback interface)
+- **Implementation**: `TwsClient` inherits `EWrapper`
+- **Execution Context**: Callbacks execute on **Thread 1** (Main)
+- **Key Methods**: `tickByTickBidAsk()`, `tickByTickAllLast()`, `error()`, `nextValidId()`
+- **Performance Constraint**: < 1μs per callback (NO I/O, NO mutex)
+
+**Outbound Communication (Application → TWS):**
+- **Interface**: `EClientSocket`
+- **Wrapper**: `TwsClient` has `std::unique_ptr<EClientSocket> m_client`
+- **Execution Context**: Called from **Thread 1** (Main)
+- **Key Methods**: `eConnect()`, `reqTickByTickData()`, `eDisconnect()`
+- **Pattern**: `client.connect()` → `m_client->eConnect(...)` → network I/O
+
+**[IMPORTANT]** "EWrapper" is a confusing name - think "ECallbackInterface" instead.
+
+#### C.3. TWS Error Code Quick Reference
 
 | Code | Meaning | Classification | Action | Retry Strategy |
 |------|---------|----------------|--------|----------------|
@@ -2011,7 +2211,7 @@ while (!shutdown && delay <= 60) {
 }
 ```
 
-#### C.3. Build & Test Commands
+#### C.4. Build & Test Commands
 
 **First-Time Setup:**
 ```bash

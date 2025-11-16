@@ -51,6 +51,15 @@ make docker-up
    - **Paper Trading**: 4002
    - **Live Trading**: 7497 (default for this project)
 
+**⚠️ Market Hours Testing Note:**
+
+If testing **outside market hours** (9:30 AM - 4:00 PM ET):
+- Bridge automatically uses historical bar data (`reqHistoricalData`) for testing
+- Real-time bars available 24/7 for major indices (SPY, QQQ, IWM)
+- Tick-by-tick data requires live market hours
+- Architecture validation works identically with bars or ticks
+- See `docs/FAIL-FAST-PLAN.md` § 2.1 for market hours pivot strategy
+
 ### 6. Run the Bridge
 
 ```bash
@@ -80,11 +89,17 @@ See comprehensive documentation in `docs/`:
 
 ### Key Design Points
 
-- **3-Thread Model**: EReader (TWS) → Main (callbacks) → Redis Worker
-- **Lock-Free Queue**: `moodycamel::ConcurrentQueue` for < 1μs enqueue
+- **3-Thread Model**: Thread 1 (Main/Callbacks) → Thread 2 (Redis Worker) ← Thread 3 (EReader - TWS)
+  - Thread 1: Message processing, EWrapper callbacks execute here (< 1μs constraint)
+  - Thread 2: State aggregation, JSON serialization, Redis publishing
+  - Thread 3: Socket I/O, TWS protocol parsing (managed by TWS API)
+- **Bidirectional Adapter**: `TwsClient` implements `EWrapper` (inbound callbacks) and wraps `EClientSocket` (outbound commands)
+- **Lock-Free Queue**: `moodycamel::ConcurrentQueue` for < 1μs enqueue (Thread 1 → Thread 2)
 - **State Aggregation**: Publishes complete snapshots (no partial updates)
 - **RapidJSON**: 10-50μs serialization (SAX Writer API)
 - **Performance Target**: < 50ms end-to-end latency (TWS → Redis)
+
+**[NOTE]** Thread numbering matches implementation. See `include/TwsClient.h` lines 1-8 for architecture clarification.
 
 ## 🛠️ Development
 
@@ -107,7 +122,14 @@ make docker-down    # Stop Redis
 make docker-logs    # View logs
 make redis-cli      # Connect to Redis CLI
 make redis-monitor  # Monitor Redis commands
+make validate-env   # Validate dev environment (Gate 1b)
 ```
+
+**Validation Gate 1b:** Use `make validate-env` to verify:
+- ✅ Redis container running (`docker ps | grep redis`)
+- ✅ Redis connectivity (`redis-cli PING` returns `PONG`)
+- ✅ Port 7497/4002 available for TWS Gateway
+- ✅ Bridge binary compiled (`./build/tws_bridge` exists)
 
 ### Testing
 
@@ -147,6 +169,25 @@ const char* TWS_HOST = "127.0.0.1";
 const int TWS_PORT = 7497;  // Paper: 4002, Live: 7497
 const int CLIENT_ID = 0;
 ```
+
+**Environment Variables (optional):**
+
+Set these to override default configuration:
+```bash
+export TWS_HOST=127.0.0.1      # TWS Gateway hostname
+export TWS_PORT=7497           # TWS Gateway port (4002 paper, 7497 live)
+export TWS_CLIENT_ID=0         # Client ID for connection
+export REDIS_URL=redis://127.0.0.1:6379  # Redis connection string
+```
+
+**Automatic Behavior Adaptation:**
+
+The bridge automatically detects market conditions:
+- **Markets Open (9:30 AM - 4:00 PM ET):** Uses tick-by-tick data (`reqTickByTickData`)
+- **Markets Closed:** Falls back to historical bars (`reqHistoricalData`) or real-time bars (`reqRealTimeBars`)
+- **Offline Testing:** Use `--replay` mode with CSV tick files
+
+See `docs/PROJECT-SPECIFICATION.md` § 2.1.2 for complete API contract details and fallback strategies.
 
 ### Instrument Subscription
 

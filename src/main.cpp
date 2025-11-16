@@ -120,20 +120,22 @@ int main(int argc, char* argv[]) {
         }
         std::cout << "[MAIN] Redis connected\n";
         
-        // Start consumer thread
+        // ========== THREAD 2: Start Redis Worker Thread ==========
+        // Consumes from lock-free queue, publishes to Redis
         std::thread workerThread(redisWorkerLoop, std::ref(queue), std::ref(redis), std::ref(g_running));
         
-        // Initialize TWS client
+        // ========== THREAD 3: Connect to TWS (starts EReader thread) ==========
         std::cout << "[MAIN] Connecting to TWS Gateway at " << TWS_HOST << ":" << TWS_PORT << "\n";
         TwsClient client(queue);
         
+        // NOTE: client.connect() internally calls m_reader->start() which spawns Thread 3 (EReader)
         if (!client.connect(TWS_HOST, TWS_PORT, CLIENT_ID)) {
             std::cerr << "[MAIN] Failed to connect to TWS Gateway\n";
             g_running.store(false);
             workerThread.join();
             return 1;
         }
-        std::cout << "[MAIN] TWS connected\n";
+        std::cout << "[MAIN] TWS connected (EReader thread now running)\n";
         
         // Wait for nextValidId callback (confirms connection)
         std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -144,10 +146,16 @@ int main(int argc, char* argv[]) {
         client.subscribeTickByTick("SPY", 1002);
         client.subscribeTickByTick("TSLA", 1003);
         
-        // REASON: Main thread runs EReader message loop (TWS API requirement)
+        // ========== THREAD 1: Main Thread Message Loop ==========
+        // Thread 3 (EReader) reads socket → signals Thread 1 → callbacks enqueue to Thread 2
         std::cout << "[MAIN] Entering message processing loop...\n";
+        std::cout << "[MAIN] Thread architecture:\n";
+        std::cout << "  Thread 1 (Main):    Processes TWS messages, calls EWrapper callbacks\n";
+        std::cout << "  Thread 2 (Worker):  Dequeues updates, publishes to Redis\n";
+        std::cout << "  Thread 3 (EReader): TWS API internal socket reader\n\n";
+        
         while (g_running.load() && client.isConnected()) {
-            client.processMessages();
+            client.processMessages();  // Dispatches callbacks on THIS thread
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         

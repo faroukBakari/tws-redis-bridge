@@ -16,18 +16,18 @@ class TwsRedisBridgeConan(ConanFile):
     
     def requirements(self):
         """Production dependencies"""
-        self.requires("redis-plus-plus/1.3.11")
-        self.requires("rapidjson/cci.20230929")
-        self.requires("concurrentqueue/1.0.4")
+        self.requires("redis-plus-plus/1.3.11")  # type: ignore[misc]
+        self.requires("rapidjson/cci.20230929")  # type: ignore[misc]
+        self.requires("concurrentqueue/1.0.4")  # type: ignore[misc]
         # NOTE: Using system protobuf 3.12.4 instead of Conan (matches TWS API)
     
     def build_requirements(self):
         """Test dependencies"""
-        self.test_requires("catch2/3.5.0")
+        self.test_requires("catch2/3.5.0")  # type: ignore[misc]
     
     def config_options(self):
-        if self.settings.os == "Windows":
-            del self.options.fPIC
+        if self.settings.os == "Windows":  # type: ignore[attr-defined]
+            del self.options.fPIC  # type: ignore[attr-defined]
     
     def layout(self):
         cmake_layout(self)

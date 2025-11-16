@@ -102,6 +102,28 @@ void TwsClient::subscribeHistoricalBars(const std::string& symbol, int tickerId,
                                  "TRADES", 1, 1, false, TagValueListSPtr());
 }
 
+void TwsClient::subscribeRealTimeBars(const std::string& symbol, int tickerId,
+                                       int barSize, const std::string& whatToShow) {
+    std::cout << "[TWS] Subscribing to real-time bars for " << symbol 
+              << " (tickerId=" << tickerId << ", barSize=" << barSize 
+              << "s, whatToShow=" << whatToShow << ")\n";
+    
+    // Store tickerId → symbol mapping
+    m_tickerToSymbol[tickerId] = symbol;
+    
+    // Create stock contract
+    Contract contract;
+    contract.symbol = symbol;
+    contract.secType = "STK";
+    contract.exchange = "SMART";
+    contract.currency = "USD";
+    
+    // Request real-time bars
+    // Parameters: tickerId, contract, barSize (seconds: 5 only), whatToShow, useRTH, realTimeBarsOptions
+    // NOTE: TWS only supports 5-second bars for real-time
+    m_client->reqRealTimeBars(tickerId, contract, barSize, whatToShow, true, TagValueListSPtr());
+}
+
 void TwsClient::processMessages() {
     if (!isConnected() || !m_reader) {
         return;
@@ -252,6 +274,42 @@ void TwsClient::historicalData(TickerId reqId, const Bar& bar) {
                   << " | O: " << bar.open << " H: " << bar.high 
                   << " L: " << bar.low << " C: " << bar.close 
                   << " V: " << bar.volume << "\n";
+    }
+}
+
+void TwsClient::realtimeBar(TickerId reqId, long time, double open, double high, double low, 
+                             double close, Decimal volume, Decimal wap, int count) {
+    // Look up symbol from tickerId
+    auto it = m_tickerToSymbol.find(reqId);
+    if (it == m_tickerToSymbol.end()) {
+        std::cerr << "[TWS] Unknown tickerId in realtimeBar: " << reqId << "\n";
+        return;
+    }
+    
+    // Convert TWS timestamp (Unix epoch seconds) to milliseconds
+    long timestamp = time * 1000;
+    
+    // Construct bar update
+    TickUpdate update;
+    update.tickerId = reqId;
+    update.type = TickUpdateType::Bar;
+    update.timestamp = timestamp;
+    update.open = open;
+    update.high = high;
+    update.low = low;
+    update.close = close;
+    update.volume = volume;
+    update.wap = wap;
+    update.barCount = count;
+    
+    // Enqueue real-time bar data
+    if (!m_queue.try_enqueue(update)) {
+        std::cerr << "[TWS] Queue full! Dropping real-time bar update\n";
+    } else {
+        std::cout << "[TWS] Real-time bar: " << it->second 
+                  << " | O: " << open << " H: " << high 
+                  << " L: " << low << " C: " << close 
+                  << " V: " << volume << "\n";
     }
 }
 

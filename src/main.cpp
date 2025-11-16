@@ -42,6 +42,7 @@ void redisWorkerLoop(moodycamel::ConcurrentQueue<TickUpdate>& queue,
             else if (update.tickerId == 1002 || update.tickerId == 11002) symbol = "SPY";
             else if (update.tickerId == 1003 || update.tickerId == 11003) symbol = "TSLA";
             else if (update.tickerId == 2001) symbol = "SPY";  // Historical bars
+            else if (update.tickerId == 3001) symbol = "SPY";  // Real-time bars
             
             // PERFORMANCE: State aggregation logic (merge BidAsk + AllLast)
             auto& state = stateMap[symbol];
@@ -163,6 +164,13 @@ int main(int argc, char* argv[]) {
         std::cout << "[MAIN] Subscribing to historical bar data (markets closed)...\n";
         std::cout << "[MAIN] Requesting 5-minute bars for last 1 hour\n";
         client.subscribeHistoricalBars("SPY", 2001, "3600 S", "5 mins");  // 1 hour of 5-min bars
+        
+        // Wait for historical data to complete
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        
+        // ========== DAY 1 EVENING: Real-Time Bars (Gate 3a) ==========
+        std::cout << "[MAIN] Subscribing to real-time bars (5-second updates)...\n";
+        client.subscribeRealTimeBars("SPY", 3001, 5, "TRADES");  // 5-second bars
         
         // ========== THREAD 1: Main Thread Message Loop ==========
         // Thread 3 (EReader) reads socket → signals Thread 1 → callbacks enqueue to Thread 2

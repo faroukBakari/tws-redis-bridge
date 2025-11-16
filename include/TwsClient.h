@@ -37,6 +37,9 @@ public:
     void subscribeHistoricalBars(const std::string& symbol, int tickerId, 
                                   const std::string& duration = "1 D", 
                                   const std::string& barSize = "5 mins");
+    void subscribeRealTimeBars(const std::string& symbol, int tickerId, 
+                                int barSize = 5, 
+                                const std::string& whatToShow = "TRADES");
     
     // Message processing loop (dispatches callbacks from EReader thread)
     void processMessages();
@@ -97,8 +100,8 @@ public:
     void scannerData(int /*reqId*/, int /*rank*/, const ContractDetails& /*contractDetails*/, const std::string& /*distance*/,
                      const std::string& /*benchmark*/, const std::string& /*projection*/, const std::string& /*legsStr*/) override {}
     void scannerDataEnd(int /*reqId*/) override {}
-    void realtimeBar(TickerId /*reqId*/, long /*time*/, double /*open*/, double /*high*/, double /*low*/, double /*close*/,
-                     Decimal /*volume*/, Decimal /*wap*/, int /*count*/) override {}
+    void realtimeBar(TickerId reqId, long time, double open, double high, double low, double close,
+                     Decimal volume, Decimal wap, int count) override;
     void currentTime(long /*time*/) override {}
     void fundamentalData(TickerId /*reqId*/, const std::string& /*data*/) override {}
     void deltaNeutralValidation(int /*reqId*/, const DeltaNeutralContract& /*deltaNeutralContract*/) override {}

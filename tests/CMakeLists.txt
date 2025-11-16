@@ -26,3 +26,18 @@ target_include_directories(test_serialization
 # Register with CTest
 include(Catch)
 catch_discover_tests(test_serialization)
+
+# PERFORMANCE: Queue benchmark (not a test, standalone executable)
+add_executable(benchmark_queue
+    benchmark_queue.cpp
+)
+
+target_link_libraries(benchmark_queue
+    PRIVATE
+    concurrentqueue::concurrentqueue
+)
+
+target_include_directories(benchmark_queue
+    PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)

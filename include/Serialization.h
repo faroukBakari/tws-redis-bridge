@@ -91,3 +91,54 @@ inline std::string serializeState(const InstrumentState& state) {
     
     return buffer.GetString();
 }
+
+/**
+ * @brief Serialize bar data to JSON using RapidJSON Writer API
+ * 
+ * [PERFORMANCE] SAX-style Writer for minimal allocations.
+ * Used for historical bar data (reqHistoricalData callbacks).
+ * 
+ * @param symbol Instrument symbol
+ * @param update TickUpdate containing bar data
+ * @return JSON string with OHLCV data
+ */
+inline std::string serializeBarData(const std::string& symbol, const TickUpdate& update) {
+    using namespace rapidjson;
+    
+    StringBuffer buffer;
+    Writer<StringBuffer> writer(buffer);
+    
+    writer.StartObject();
+    
+    writer.Key("symbol");
+    writer.String(symbol.c_str());
+    
+    writer.Key("timestamp");
+    writer.Int64(update.timestamp);
+    
+    writer.Key("open");
+    writer.Double(update.open);
+    
+    writer.Key("high");
+    writer.Double(update.high);
+    
+    writer.Key("low");
+    writer.Double(update.low);
+    
+    writer.Key("close");
+    writer.Double(update.close);
+    
+    writer.Key("volume");
+    writer.Int64(update.volume);
+    
+    writer.Key("wap");
+    writer.Double(update.wap);
+    
+    writer.Key("barCount");
+    writer.Int(update.barCount);
+    
+    writer.EndObject();
+    
+    return buffer.GetString();
+}
+

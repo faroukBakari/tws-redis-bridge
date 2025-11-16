@@ -8,7 +8,8 @@
  */
 enum class TickUpdateType {
     BidAsk,   // tickByTickBidAsk callback
-    AllLast   // tickByTickAllLast callback
+    AllLast,  // tickByTickAllLast callback
+    Bar       // historicalData callback (for testing when markets closed)
 };
 
 /**
@@ -34,6 +35,15 @@ struct TickUpdate {
     double lastPrice = 0.0;
     int lastSize = 0;
     bool pastLimit = false;
+    
+    // Bar fields (for historicalData callback)
+    double open = 0.0;
+    double high = 0.0;
+    double low = 0.0;
+    double close = 0.0;
+    long volume = 0;
+    double wap = 0.0;  // Weighted average price
+    int barCount = 0;
 };
 
 /**

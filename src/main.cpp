@@ -33,7 +33,7 @@ void redisWorkerLoop(moodycamel::ConcurrentQueue<TickUpdate>& queue,
     
     TickUpdate update;
     while (running.load()) {
-        // REASON: Non-blocking dequeue with timeout
+        // REASON: Non-blocking dequeue with short timeout for responsive shutdown
         if (queue.try_dequeue(update)) {
             // REASON: Get symbol from tickerId map (need to pass from TwsClient)
             // For now, derive symbol from tickerId (temporary hack)
@@ -41,6 +41,7 @@ void redisWorkerLoop(moodycamel::ConcurrentQueue<TickUpdate>& queue,
             if (update.tickerId == 1001 || update.tickerId == 11001) symbol = "AAPL";
             else if (update.tickerId == 1002 || update.tickerId == 11002) symbol = "SPY";
             else if (update.tickerId == 1003 || update.tickerId == 11003) symbol = "TSLA";
+            else if (update.tickerId == 2001) symbol = "SPY";  // Historical bars
             
             // PERFORMANCE: State aggregation logic (merge BidAsk + AllLast)
             auto& state = stateMap[symbol];
@@ -60,6 +61,24 @@ void redisWorkerLoop(moodycamel::ConcurrentQueue<TickUpdate>& queue,
                 state.tradeTimestamp = update.timestamp;
                 state.hasTrade = true;
                 state.pastLimit = update.pastLimit;
+            } else if (update.type == TickUpdateType::Bar) {
+                // PIVOT: Bar data handling for Gate 2a-2c testing
+                std::cout << "[WORKER] Bar: " << symbol 
+                          << " | O: " << update.open << " H: " << update.high
+                          << " L: " << update.low << " C: " << update.close
+                          << " V: " << update.volume << "\n";
+                
+                // Publish bar data immediately (no aggregation needed)
+                try {
+                    std::string json = serializeBarData(symbol, update);
+                    
+                    std::string channel = "TWS:BARS:" + symbol;
+                    redis.publish(channel, json);
+                    std::cout << "[WORKER] Published bar to " << channel << "\n";
+                } catch (const std::exception& e) {
+                    std::cerr << "[WORKER] Redis publish error: " << e.what() << "\n";
+                }
+                continue;  // Skip tick aggregation logic
             }
             
             // REASON: Only publish when we have both BidAsk AND AllLast
@@ -140,11 +159,10 @@ int main(int argc, char* argv[]) {
         // Wait for nextValidId callback (confirms connection)
         std::this_thread::sleep_for(std::chrono::seconds(1));
         
-        // Subscribe to tick-by-tick data for test instruments
-        std::cout << "[MAIN] Subscribing to tick-by-tick data...\n";
-        client.subscribeTickByTick("AAPL", 1001);
-        client.subscribeTickByTick("SPY", 1002);
-        client.subscribeTickByTick("TSLA", 1003);
+        // ========== PIVOT: Use historical bars instead of tick-by-tick (markets closed) ==========
+        std::cout << "[MAIN] Subscribing to historical bar data (markets closed)...\n";
+        std::cout << "[MAIN] Requesting 5-minute bars for last 1 hour\n";
+        client.subscribeHistoricalBars("SPY", 2001, "3600 S", "5 mins");  // 1 hour of 5-min bars
         
         // ========== THREAD 1: Main Thread Message Loop ==========
         // Thread 3 (EReader) reads socket → signals Thread 1 → callbacks enqueue to Thread 2
@@ -154,14 +172,28 @@ int main(int argc, char* argv[]) {
         std::cout << "  Thread 2 (Worker):  Dequeues updates, publishes to Redis\n";
         std::cout << "  Thread 3 (EReader): TWS API internal socket reader\n\n";
         
+        // REASON: Use separate thread for TWS message processing to avoid blocking on waitForSignal()
+        // This allows main thread to respond to signals immediately
+        std::thread msgThread([&client]() {
+            while (g_running.load() && client.isConnected()) {
+                client.processMessages();
+            }
+            std::cout << "[MSG] Message processing thread stopped\n";
+        });
+        
+        // REASON: Main thread just monitors shutdown flag
         while (g_running.load() && client.isConnected()) {
-            client.processMessages();  // Dispatches callbacks on THIS thread
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         
-        // Graceful shutdown
+        // REASON: Clean shutdown sequence
         std::cout << "[MAIN] Disconnecting from TWS...\n";
         client.disconnect();
+        
+        std::cout << "[MAIN] Waiting for message thread...\n";
+        if (msgThread.joinable()) {
+            msgThread.join();
+        }
         
         std::cout << "[MAIN] Waiting for worker thread...\n";
         workerThread.join();

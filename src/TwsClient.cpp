@@ -47,8 +47,8 @@ bool TwsClient::connect(const std::string& host, unsigned int port, int clientId
 void TwsClient::disconnect() {
     if (m_connected.load()) {
         std::cout << "[TWS] Disconnecting...\n";
-        m_client->eDisconnect();
         m_connected.store(false);
+        m_client->eDisconnect();
     }
 }
 
@@ -78,11 +78,42 @@ void TwsClient::subscribeTickByTick(const std::string& symbol, int tickerId) {
     m_tickerToSymbol[tickerId + 10000] = symbol;
 }
 
+void TwsClient::subscribeHistoricalBars(const std::string& symbol, int tickerId,
+                                         const std::string& duration,
+                                         const std::string& barSize) {
+    std::cout << "[TWS] Subscribing to historical bars for " << symbol 
+              << " (tickerId=" << tickerId << ", duration=" << duration 
+              << ", barSize=" << barSize << ")\n";
+    
+    // Store tickerId → symbol mapping
+    m_tickerToSymbol[tickerId] = symbol;
+    
+    // Create stock contract
+    Contract contract;
+    contract.symbol = symbol;
+    contract.secType = "STK";
+    contract.exchange = "SMART";
+    contract.currency = "USD";
+    
+    // Request historical data
+    // Parameters: tickerId, contract, endDateTime (empty=now), duration, barSize, 
+    //             whatToShow, useRTH, formatDate, keepUpToDate, chartOptions
+    m_client->reqHistoricalData(tickerId, contract, "", duration, barSize, 
+                                 "TRADES", 1, 1, false, TagValueListSPtr());
+}
+
 void TwsClient::processMessages() {
-    // EReader signals when messages are available (cross-thread notification)
+    if (!isConnected() || !m_reader) {
+        return;
+    }
+    
+    // REASON: Check if messages are available, process them
+    // waitForSignal() blocks, but we'll handle timeout at main loop level
     m_signal->waitForSignal();
-    // Decode and dispatch callbacks on THIS thread (Thread 1)
-    m_reader->processMsgs();
+    
+    if (isConnected() && m_reader) {
+        m_reader->processMsgs();
+    }
 }
 
 // ========== Inbound API: Callbacks TWS invokes ON us ==========
@@ -184,6 +215,50 @@ void TwsClient::tickSize(TickerId tickerId, TickType field, Decimal size) {
 void TwsClient::tickString(TickerId tickerId, TickType tickType, const std::string& value) {
     (void)tickerId; (void)tickType; (void)value;
     // Not used in tick-by-tick mode
+}
+
+void TwsClient::historicalData(TickerId reqId, const Bar& bar) {
+    // Look up symbol from tickerId
+    auto it = m_tickerToSymbol.find(reqId);
+    if (it == m_tickerToSymbol.end()) {
+        std::cerr << "[TWS] Unknown tickerId in historicalData: " << reqId << "\n";
+        return;
+    }
+    
+    // Parse bar timestamp from TWS format (YYYYMMDD HH:MM:SS)
+    // For MVP, use current time (TODO: parse bar.time string properly)
+    long timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+    
+    // Construct bar update
+    TickUpdate update;
+    update.tickerId = reqId;
+    update.type = TickUpdateType::Bar;
+    update.timestamp = timestamp;
+    update.open = bar.open;
+    update.high = bar.high;
+    update.low = bar.low;
+    update.close = bar.close;
+    update.volume = bar.volume;
+    update.wap = bar.wap;
+    update.barCount = bar.count;
+    
+    // Enqueue bar data
+    if (!m_queue.try_enqueue(update)) {
+        std::cerr << "[TWS] Queue full! Dropping bar update\n";
+    } else {
+        std::cout << "[TWS] Historical bar: " << it->second 
+                  << " | O: " << bar.open << " H: " << bar.high 
+                  << " L: " << bar.low << " C: " << bar.close 
+                  << " V: " << bar.volume << "\n";
+    }
+}
+
+void TwsClient::historicalDataEnd(int reqId, const std::string& startDateStr, 
+                                   const std::string& endDateStr) {
+    std::cout << "[TWS] Historical data complete for reqId=" << reqId 
+              << " (start=" << startDateStr << ", end=" << endDateStr << ")\n";
 }
 
 } // namespace tws_bridge

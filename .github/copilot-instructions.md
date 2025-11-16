@@ -29,6 +29,8 @@ This rule takes **absolute precedence** and **overrides all rules above and belo
 
 These are specific architectural mandates for this TWS-to-Redis bridge.
 
+* **Tools selection:**:
+    * Always explore relevant tools at your disposal and optimize your selection based on the task requirements.
 * **Project specification document:**:
     * docs/PROJECT-SPECIFICATION.md
 * **TWS API Research First:**
@@ -76,6 +78,7 @@ These rules are critical and must be followed at all times.
   * Prefer bullet points over long paragraphs.
   * Prefer example snippets with source references over full code implementations.
   * Prefer tables and diagrams over long textual explanations.
+  * never use commands to update documentation. Always use the appropriate built-in mcp tools.
   * **Key Techniques for AI Agent Readability:**
     1. Use ADR-style callouts for architectural decisions : `**[DECISION]**: Use XYZ pattern for ABC [rationale] [alternatives-rejected] [date]`
     2. Add or update structured metadata at section starts for quick AI parsing: `<!-- METADATA: scope=..., priority=..., dependencies=[...] -->`

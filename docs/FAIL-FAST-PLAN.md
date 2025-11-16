@@ -43,23 +43,24 @@
     - [x] All C++ code compiles without errors
     - [x] All tests pass (2/2 tests)
     - [x] Binary created: `build/tws_bridge` (4.0MB)
-  - [ ] **Validation Gate 1b:** Development Environment Setup
-    - [ ] Create Docker Compose with Redis container
-    - [ ] Add Makefile targets: `make dev-up`, `make dev-down`, `make dev-logs`
-    - [ ] Test Redis connectivity: `redis-cli PING`
-    - [ ] Document local development workflow
-- [ ] Afternoon: End-to-End Validation
-  - [ ] **⚠️ PIVOT:** Use historical bar data instead of tick-by-tick (markets closed)
-  - [ ] Implement `reqHistoricalData()` for one instrument (SPY)
-  - [ ] Implement `historicalData()` callback
-  - [ ] Test: Receive historical bars (5-minute bars, last 1 hour)
-  - [ ] **Validation Gate 2a:** Receive first historicalData() callback
-  - [ ] Implement simple queue enqueue in callback
-  - [ ] Implement consumer thread dequeue and console print
-  - [ ] **Validation Gate 2b:** Data flows TWS → Queue → Console
-  - [ ] Test Redis publish from consumer thread
-  - [ ] Verify with `redis-cli SUBSCRIBE "TWS:BARS:SPY"`
-  - [ ] **✅ Validation Gate 2c:** Complete end-to-end flow (TWS → Queue → Redis)
+  - [x] **✅ Validation Gate 1b PASSED:** Development Environment Setup
+    - [x] Create Docker Compose with Redis container
+    - [x] Add Makefile targets: `make docker-up`, `make docker-down`, `make docker-logs`
+    - [x] Test Redis connectivity: `redis-cli PING`
+    - [x] Document local development workflow
+- [x] Afternoon: End-to-End Validation
+  - [x] **⚠️ PIVOT:** Use historical bar data instead of tick-by-tick (markets closed)
+  - [x] Implement `reqHistoricalData()` for one instrument (SPY)
+  - [x] Implement `historicalData()` callback
+  - [x] Test: Receive historical bars (5-minute bars, last 1 hour)
+  - [x] **✅ Validation Gate 2a PASSED:** Receive first historicalData() callback
+  - [x] Implement simple queue enqueue in callback
+  - [x] Implement consumer thread dequeue and console print
+  - [x] **✅ Validation Gate 2b PASSED:** Data flows TWS → Queue → Console
+  - [x] Test Redis publish from consumer thread
+  - [x] Verify with `redis-cli SUBSCRIBE "TWS:BARS:SPY"`
+  - [x] **✅ Validation Gate 2c PASSED:** Complete end-to-end flow (TWS → Queue → Redis)
+  - [x] **BONUS:** Fixed shutdown behavior - Ctrl+C now works properly
 - [ ] Evening: Lock-Free Queue + Real-Time Bar Updates
   - [ ] Already integrated: moodycamel::ConcurrentQueue in main.cpp
   - [ ] Subscribe to real-time bar updates: `reqRealTimeBars()`
@@ -434,10 +435,10 @@ Each validation gate has clear **pass/fail criteria**:
 | Gate | Criteria | Evidence | Status |
 |------|----------|----------|--------|
 | **Gate 1a** | TWS API compiles and links | Build log shows success, binary created | ✅ **PASSED** |
-| **Gate 1b** | Dev environment ready | Redis container runs, `make dev-up` works | ⏳ **IN PROGRESS** |
-| **Gate 2a** | First bar callback received | Console shows `historicalData()` log | 🔴 **BLOCKED** |
-| **Gate 2b** | Data flows to queue | TWS → Queue → Console prints bars | 🔴 **BLOCKED** |
-| **Gate 2c** | End-to-end to Redis | `redis-cli` receives bar messages | 🔴 **BLOCKED** |
+| **Gate 1b** | Dev environment ready | Redis container runs, `make docker-up` works | ✅ **PASSED** |
+| **Gate 2a** | First bar callback received | Console shows `historicalData()` log | ✅ **PASSED** |
+| **Gate 2b** | Data flows to queue | TWS → Queue → Console prints bars | ✅ **PASSED** |
+| **Gate 2c** | End-to-end to Redis | `redis-cli` receives bar messages | ✅ **PASSED** |
 | **Gate 3a** | Real-time bars work | Real-time bar updates flow to Redis | 🔴 **PENDING** |
 | **Gate 3b** | Queue performance | Benchmark: enqueue < 1μs | 🔴 **PENDING** |
 | **Gate 4** | Historical ticks work | `historicalTicksBidAsk()` callback received | 🔴 **PENDING** |
@@ -672,17 +673,9 @@ Each validation gate has clear **pass/fail criteria**:
 3. ~~Run `./vendor/install_intel_bid.sh` to build `libbid.a`~~ ✅ Complete
 4. ~~Run `make build` to complete linking~~ ✅ Complete
 5. ✅ **MILESTONE:** Validation Gate 1a **PASSED** (Compilation)
-6. ⏳ **IN PROGRESS:** Validation Gate 1b (Dev Environment Setup):
-   - Create `docker-compose.yml` with Redis container
-   - Add Makefile targets: `make dev-up`, `make dev-down`, `make dev-logs`
-   - Test Redis connectivity
-   - Update README with local development workflow
-7. **NEXT:** Day 1 afternoon tasks (after Gate 1b passes):
-   - ⚠️ **PIVOT:** Use `reqHistoricalData()` instead of tick-by-tick (markets closed)
-   - Implement `EClient::eConnect()` and `EReader` thread creation
-   - Implement `nextValidId()` and `historicalData()` callbacks
-   - Subscribe to historical bars for **one** instrument (SPY)
-   - **Target:** Pass Validation Gate 2a-2c (end-to-end flow)
+6. ✅ **MILESTONE:** Validation Gate 1b **PASSED** (Dev Environment Setup)
+7. ✅ **MILESTONE:** Validation Gates 2a-2c **PASSED** (End-to-End Flow)
+8. **NEXT:** Day 1 evening tasks (Gates 3a-3b: Real-time bars + performance)
 
 **Files Modified:**
 - `/vendor/README.md` - Added TWS API v1037.02 version info
@@ -758,9 +751,9 @@ Each validation gate has clear **pass/fail criteria**:
 ```
 Day 1 Morning: Gate 1a (Compilation) ✅ PASSED
          ↓
-Day 1 Morning: Gate 1b (Dev Environment) ⏳ IN PROGRESS
+Day 1 Morning: Gate 1b (Dev Environment) ✅ PASSED
          ↓
-Day 1 Afternoon: Gate 2a → 2b → 2c (End-to-End with Bars)
+Day 1 Afternoon: Gate 2a → 2b → 2c (End-to-End with Bars) ✅ PASSED
          ↓
 Day 1 Evening: Gate 3a → 3b (Real-Time Bars + Queue Performance)
          ↓
@@ -784,7 +777,8 @@ Day 5 Afternoon: Gate 12 (Performance Validation)
 ```
 
 **Critical Path Notes:**
-- **Gates 2a-2c** are the highest priority (end-to-end validation)
+- **Gates 1a-2c** ✅ COMPLETED (Day 1 morning + afternoon)
+- **Gates 2a-2c** validated end-to-end flow successfully
 - **Gate 1b** blocks all subsequent gates (dev environment required)
 - **Gates 3a-3b** can be partially parallelized with Gate 2 work
 - **Gates 6-8** focus on optimization, not blocking
@@ -863,3 +857,108 @@ Day 5 Afternoon: Gate 12 (Performance Validation)
 ---
 
 **Document Status:** ✅ READY FOR EXECUTION
+
+---
+
+## 10. Session Log (Continued)
+
+### Session 3 - November 16, 2025 (Day 1 Afternoon Complete: Gates 2a-2c)
+
+**✅ MAJOR MILESTONES:**
+- **Gate 2a PASSED:** Historical bar callbacks received (12 bars of SPY data from TWS)
+- **Gate 2b PASSED:** Data flows through lock-free queue (TWS → Queue → Console)
+- **Gate 2c PASSED:** End-to-end pipeline validated (TWS → Queue → Redis Pub/Sub)
+- **CRITICAL FIX:** Shutdown behavior redesigned - Ctrl+C terminates cleanly (< 1 second)
+
+**Technical Achievements:**
+
+1. **Historical Bar Data Integration:**
+   - Implemented `subscribeHistoricalBars()` method in TwsClient
+   - Added `historicalData()` and `historicalDataEnd()` callback handlers
+   - Extended `TickUpdate` struct with bar fields (OHLCV + WAP)
+   - Created `serializeBarData()` function using RapidJSON
+
+2. **Architecture Redesign (Clean RAII):**
+   - **BEFORE:** Signal handling mess mixed into TwsClient
+   - **AFTER:** Signal handling ONLY in main(), destructors handle cleanup
+   - Thread separation: Main (monitor) + Worker (Redis) + EReader (TWS) + Message (callbacks)
+   - Result: Clean, maintainable code following C++ best practices
+
+3. **Testing Infrastructure:**
+   - Created `scripts/test_bridge.sh` with 6 automated test cases:
+     - `build` - Verify compilation
+     - `redis` - Check Redis container connectivity
+     - `tws` - Verify TWS Gateway on port 7497
+     - `run` - Quick 5-second runtime test
+     - `shutdown` - Validate Ctrl+C behavior
+     - `subscribe` - Test Redis Pub/Sub reception
+   - All tests passing ✅
+
+**Validation Evidence:**
+
+*Connection & Data Reception:*
+```
+[TWS] Connection established, EReader thread started
+[TWS] nextValidId: 1 (connection confirmed)
+[TWS] Historical bar: SPY | O: 674.64 H: 675.12 L: 674.47 C: 674.82 V: ...
+```
+
+*Queue & Redis Publication:*
+```
+[WORKER] Bar: SPY | O: 674.64 H: 675.12 L: 674.47 C: 674.82 V: ...
+[WORKER] Published bar to TWS:BARS:SPY
+```
+
+*Clean Shutdown:*
+```
+[MAIN] Received signal 2, shutting down...
+[MAIN] Disconnecting from TWS...
+[MSG] Message processing thread stopped
+[WORKER] Redis worker thread stopped
+✓ Process terminated cleanly in 1 attempts (0.5s each)
+```
+
+**Files Created/Modified:**
+- `include/MarketData.h` - Added `TickUpdateType::Bar`, bar OHLCV fields
+- `include/Serialization.h` - Implemented `serializeBarData()` with RapidJSON
+- `include/TwsClient.h` - Added `subscribeHistoricalBars()` method
+- `src/TwsClient.cpp` - Historical bar callbacks, clean disconnect logic
+- `src/main.cpp` - 4-thread architecture, proper RAII shutdown
+- `scripts/test_bridge.sh` - **NEW** automated test suite
+
+**Key Design Lessons:**
+
+1. **Separation of Concerns:**
+   - Signal handling belongs in application entry point (main), NOT business logic
+   - Each class should have ONE responsibility (Single Responsibility Principle)
+   - TwsClient manages TWS connection, NOT application lifecycle
+
+2. **RAII Over Manual Management:**
+   - Destructors automatically clean up resources
+   - No need for manual flags or complex state machines
+   - Compiler guarantees cleanup happens in correct order
+
+3. **Thread Safety Patterns:**
+   - Blocking operations (waitForSignal) isolated in dedicated thread
+   - Main thread remains responsive to signals
+   - std::atomic for simple flags, lock-free queue for data transfer
+   - No mutexes in critical path (performance requirement)
+
+4. **Testing is Not Optional:**
+   - Shell scripts > manual commands (reproducible, automatable)
+   - Test early, test often
+   - Shutdown behavior is a feature, not an afterthought
+
+**Performance Notes:**
+- Historical bars received: 12 bars in < 1 second
+- Queue enqueue: Non-blocking, zero reported drops
+- Redis publish: Successful for all 12 bars
+- Shutdown latency: < 1 second (previously hung indefinitely)
+
+**Next Session Focus:**
+- Day 1 Evening: Gates 3a-3b (Real-time bars + queue performance benchmarks)
+- Implement `reqRealTimeBars()` for 5-second updates
+- Benchmark lock-free queue performance (target: < 1μs enqueue)
+
+**Status:** Day 1 Afternoon objectives **COMPLETE** ✅
+

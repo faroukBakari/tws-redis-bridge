@@ -31,6 +31,7 @@
 #include "OpenOrder.pb.h"
 #include "OpenOrdersEnd.pb.h"
 #include "OrderStatus.pb.h"
+#include "IErrorHandler.h"
 
 enum TickType { BID_SIZE, BID, ASK, ASK_SIZE, LAST, LAST_SIZE,
 				HIGH, LOW, VOLUME, CLOSE,
@@ -148,7 +149,7 @@ struct Execution;
 struct DeltaNeutralContract;
 struct CommissionAndFeesReport;
 
-class EWrapper
+class EWrapper : public IErrorHandler
 {
 public:
    virtual ~EWrapper() {};

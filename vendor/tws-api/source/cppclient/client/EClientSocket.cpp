@@ -8,7 +8,6 @@
 #include "EClientSocket.h"
 
 #include "TwsSocketClientErrors.h"
-#include "EWrapper.h"
 #include "EDecoder.h"
 #include "EReaderSignal.h"
 #include "EReader.h"
@@ -25,7 +24,7 @@ const int MIN_SERVER_VER_SUPPORTED = 38; //all supported server versions are def
 
 ///////////////////////////////////////////////////////////
 // member funcs
-EClientSocket::EClientSocket(EWrapper* ptr, EReaderSignal* pSignal) : EClient(ptr, new ESocket())
+EClientSocket::EClientSocket(IErrorHandler* ptr, EReaderSignal* pSignal) : EClient(ptr, new ESocket())
 {
   m_fd = SocketsInit() ? -1 : -2;
   m_allowRedirect = false;
@@ -67,7 +66,7 @@ bool EClientSocket::eConnect(const char* host, int port, int clientId, bool extr
   }
 
   if (m_fd == -2) {
-    getWrapper()->error(NO_VALID_ID, Utils::currentTimeMillis(), FAIL_CREATE_SOCK.code(), FAIL_CREATE_SOCK.msg(), "");
+    getErrorHandler()->error(NO_VALID_ID, Utils::currentTimeMillis(), FAIL_CREATE_SOCK.code(), FAIL_CREATE_SOCK.msg(), "");
     return false;
   }
 
@@ -77,7 +76,7 @@ bool EClientSocket::eConnect(const char* host, int port, int clientId, bool extr
   // already connected?
   if (m_fd >= 0) {
     errno = EISCONN;
-    getWrapper()->error(NO_VALID_ID, Utils::currentTimeMillis(), ALREADY_CONNECTED.code(), ALREADY_CONNECTED.msg(), "");
+    getErrorHandler()->error(NO_VALID_ID, Utils::currentTimeMillis(), ALREADY_CONNECTED.code(), ALREADY_CONNECTED.msg(), "");
     return false;
   }
 
@@ -109,7 +108,7 @@ bool EClientSocket::eConnectImpl(int clientId, bool extraAuth, ConnState* stateO
   // resolve host
   struct hostent* hostEnt = gethostbyname(host().c_str());
   if (!hostEnt) {
-    getWrapper()->error(NO_VALID_ID, Utils::currentTimeMillis(), CONNECT_FAIL.code(), CONNECT_FAIL.msg(), "");
+    getErrorHandler()->error(NO_VALID_ID, Utils::currentTimeMillis(), CONNECT_FAIL.code(), CONNECT_FAIL.msg(), "");
     return false;
   }
 
@@ -118,7 +117,7 @@ bool EClientSocket::eConnectImpl(int clientId, bool extraAuth, ConnState* stateO
 
   // cannot create socket
   if (m_fd < 0) {
-    getWrapper()->error(NO_VALID_ID, Utils::currentTimeMillis(), FAIL_CREATE_SOCK.code(), FAIL_CREATE_SOCK.msg(), "");
+    getErrorHandler()->error(NO_VALID_ID, Utils::currentTimeMillis(), FAIL_CREATE_SOCK.code(), FAIL_CREATE_SOCK.msg(), "");
     return false;
   }
 
@@ -134,7 +133,7 @@ bool EClientSocket::eConnectImpl(int clientId, bool extraAuth, ConnState* stateO
     // error connecting
     SocketClose(m_fd);
     m_fd = -1;
-    getWrapper()->error(NO_VALID_ID, Utils::currentTimeMillis(), CONNECT_FAIL.code(), CONNECT_FAIL.msg(), "");
+    getErrorHandler()->error(NO_VALID_ID, Utils::currentTimeMillis(), CONNECT_FAIL.code(), CONNECT_FAIL.msg(), "");
     return false;
   }
 
@@ -164,7 +163,7 @@ bool EClientSocket::eConnectImpl(int clientId, bool extraAuth, ConnState* stateO
   if (!SetSocketNonBlocking(m_fd)) {
     // error setting socket to non-blocking
     eDisconnect();
-    getWrapper()->error(NO_VALID_ID, Utils::currentTimeMillis(), CONNECT_FAIL.code(), CONNECT_FAIL.msg(), "");
+    getErrorHandler()->error(NO_VALID_ID, Utils::currentTimeMillis(), CONNECT_FAIL.code(), CONNECT_FAIL.msg(), "");
     return false;
   }
 
@@ -287,7 +286,7 @@ void EClientSocket::serverVersion(int version, const char* time) {
 
   if (usingV100Plus() ? (m_serverVersion < MIN_CLIENT_VER || m_serverVersion > MAX_CLIENT_VER) : m_serverVersion < MIN_SERVER_VER_SUPPORTED) {
     eDisconnect();
-    getWrapper()->error(NO_VALID_ID, Utils::currentTimeMillis(), UNSUPPORTED_VERSION.code(), UNSUPPORTED_VERSION.msg(), "");
+    getErrorHandler()->error(NO_VALID_ID, Utils::currentTimeMillis(), UNSUPPORTED_VERSION.code(), UNSUPPORTED_VERSION.msg(), "");
     return;
   }
 
@@ -300,7 +299,7 @@ void EClientSocket::redirect(const char* host, int port) {
 
   if ((hostNorm != this->host() || (port > 0 && port != this->port()))) {
     if (!m_allowRedirect) {
-      getWrapper()->error(NO_VALID_ID, Utils::currentTimeMillis(), CONNECT_FAIL.code(), CONNECT_FAIL.msg(), "");
+      getErrorHandler()->error(NO_VALID_ID, Utils::currentTimeMillis(), CONNECT_FAIL.code(), CONNECT_FAIL.msg(), "");
 
       return;
     }
@@ -315,7 +314,7 @@ void EClientSocket::redirect(const char* host, int port) {
 
     if (m_redirectCount > REDIRECT_COUNT_MAX) {
       eDisconnect();
-      getWrapper()->error(NO_VALID_ID, Utils::currentTimeMillis(), CONNECT_FAIL.code(), "Redirect count exceeded", "");
+      getErrorHandler()->error(NO_VALID_ID, Utils::currentTimeMillis(), CONNECT_FAIL.code(), "Redirect count exceeded", "");
       return;
     }
 
@@ -343,10 +342,10 @@ bool EClientSocket::handleSocketError()
     return false;
 
   if (errno == ECONNREFUSED) {
-    getWrapper()->error(NO_VALID_ID, Utils::currentTimeMillis(), CONNECT_FAIL.code(), CONNECT_FAIL.msg(), "");
+    getErrorHandler()->error(NO_VALID_ID, Utils::currentTimeMillis(), CONNECT_FAIL.code(), CONNECT_FAIL.msg(), "");
   }
   else {
-    getWrapper()->error(NO_VALID_ID, Utils::currentTimeMillis(), SOCKET_EXCEPTION.code(), SOCKET_EXCEPTION.msg() + strerror(errno), "");
+    getErrorHandler()->error(NO_VALID_ID, Utils::currentTimeMillis(), SOCKET_EXCEPTION.code(), SOCKET_EXCEPTION.msg() + strerror(errno), "");
   }
 
   // reset errno
@@ -368,7 +367,6 @@ void EClientSocket::onSend()
 void EClientSocket::onClose()
 {
   eDisconnect();
-  getWrapper()->connectionClosed();
 }
 
 void EClientSocket::onError()

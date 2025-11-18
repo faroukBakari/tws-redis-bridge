@@ -17,7 +17,7 @@
 static DefaultEWrapper defaultWrapper;
 
 EReader::EReader(EClientSocket* clientSocket, EReaderSignal* signal)
-  : processMsgsDecoder_(clientSocket->EClient::serverVersion(), clientSocket->getWrapper(), clientSocket)
+  : processMsgsDecoder_(clientSocket->EClient::serverVersion(), &defaultWrapper, clientSocket)
 #if defined(IB_POSIX)
   , m_hReadThread(pthread_self())
 #elif defined(IB_WIN32)

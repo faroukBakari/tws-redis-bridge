@@ -25,7 +25,7 @@ TwsClient::~TwsClient() {
 
 // ========== Outbound API: Commands we send TO TWS ==========
 
-bool TwsClient::connect(const std::string& host, unsigned int port, int clientId) {
+bool TwsClient::createConnection(const std::string& host, unsigned int port, int clientId) {
     std::cout << "[TWS] Attempting connection to " << host << ":" << port << "\n";
     
     bool success = m_client->eConnect(host.c_str(), port, clientId, false);

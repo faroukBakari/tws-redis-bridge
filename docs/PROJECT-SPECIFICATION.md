@@ -84,6 +84,7 @@ This specification defines the requirements, architecture, and technical design 
 **TWS-Redis Bridge** is a low-latency C++ microservice that consumes real-time market data from Interactive Brokers' Trader Workstation (TWS) API and publishes normalized tick data to Redis Pub/Sub channels. It serves as a high-performance data ingestion and distribution backbone for the [trader-pro](https://github.com/faroukBakari/trader-pro) Vue.js + FastAPI trading platform.
 
 **Core Functionality:**
+- **Dynamic subscription management** via Redis command channel (FastAPI → Bridge)
 - **Real-time tick-by-tick data ingestion** via TWS C++ API (`reqTickByTickData`)
 - **Producer-consumer architecture** with lock-free queue for non-blocking data flow
 - **State aggregation** of partial TWS updates into complete market snapshots
@@ -107,16 +108,18 @@ This specification defines the requirements, architecture, and technical design 
 **Architecture Pattern:** Event-driven producer-consumer with decoupled microservice
 
 **Key Components:**
-1. **TWS Integration Layer:** EWrapper/EClient/EReader pattern for tick-by-tick subscriptions
-2. **Lock-Free Queue:** `moodycamel::ConcurrentQueue` for non-blocking inter-thread handoff (< 100ns)
-3. **State Manager:** Aggregates partial updates (BidAsk/AllLast) into complete instrument snapshots
-4. **JSON Serializer:** RapidJSON Writer API for high-performance serialization (10-50μs)
-5. **Redis Publisher:** `redis-plus-plus` with connection pooling for reliable publishing
+1. **Command Listener:** Subscribes to `TWS:COMMANDS` channel for dynamic subscription requests from FastAPI
+2. **TWS Integration Layer:** EWrapper/EClient/EReader pattern for tick-by-tick subscriptions
+3. **Lock-Free Queue:** `moodycamel::ConcurrentQueue` for non-blocking inter-thread handoff (< 100ns)
+4. **State Manager:** Aggregates partial updates (BidAsk/AllLast) into complete instrument snapshots
+5. **JSON Serializer:** RapidJSON Writer API for high-performance serialization (10-50μs)
+6. **Redis Publisher:** `redis-plus-plus` with connection pooling for reliable publishing
 
 **Threading Model:**
 - **Thread 1 (TWS EReader):** Reads TCP socket, enqueues messages (managed by TWS API)
 - **Thread 2 (Main/Producer):** Processes TWS callbacks, enqueues `TickUpdate` structs (< 1μs per callback)
-- **Thread 3 (Redis Worker/Consumer):** Dequeues, updates state, serializes, publishes (> 10K msg/sec)
+- **Thread 3 (Redis Worker/Consumer):** Listens for commands, dequeues tick data, updates state, serializes, publishes (> 10K msg/sec)
+- **Thread 4 (Command Listener):** Subscribes to `TWS:COMMANDS`, processes subscribe/unsubscribe requests from FastAPI
 
 **Technology Stack:** C++17/20, Conan 2.x, CMake, Catch2, TWS API, redis-plus-plus, RapidJSON, moodycamel::ConcurrentQueue
 
@@ -177,29 +180,42 @@ This specification defines the requirements, architecture, and technical design 
 
 **[REQUIRED]** Primary use cases for MVP:
 
-**UC-1: Real-Time Market Data Consumption**
-- **Actor:** TWS-Redis Bridge (automated)
-- **Precondition:** TWS Gateway running, API enabled, market data subscription active
+**UC-1: Dynamic Subscription Request (FastAPI → Bridge)**
+- **Actor:** FastAPI backend (on behalf of user)
+- **Precondition:** Bridge connected to TWS and listening on `TWS:COMMANDS`
 - **Flow:**
-  1. Bridge establishes TCP connection to TWS Gateway (port 4002/7496)
-  2. Subscribes to tick-by-tick data for specified instruments (`reqTickByTickData`)
-  3. Receives `tickByTickBidAsk` callbacks (quote updates)
-  4. Receives `tickByTickAllLast` callbacks (trade updates)
-  5. Aggregates partial updates into complete instrument state
-  6. Serializes to JSON and publishes to Redis channel
+  1. User requests market data for AAPL via FastAPI endpoint
+  2. FastAPI publishes command to `TWS:COMMANDS`: `{"action":"subscribe","symbol":"AAPL",...}`
+  3. Bridge Command Listener receives command
+  4. Bridge validates contract and calls `reqTickByTickData()`
+  5. Bridge publishes confirmation to `TWS:STATUS`
+  6. TWS starts sending tick data
+  7. Bridge publishes ticks to `TWS:TICKS:AAPL`
+- **Postcondition:** Real-time market data flowing to `TWS:TICKS:AAPL`
+- **Exception:** Invalid symbol → error published to `TWS:STATUS`
+
+**UC-2: Real-Time Market Data Consumption**
+- **Actor:** TWS-Redis Bridge (automated)
+- **Precondition:** TWS Gateway running, subscription active via UC-1
+- **Flow:**
+  1. Receives `tickByTickBidAsk` callbacks (quote updates)
+  2. Receives `tickByTickAllLast` callbacks (trade updates)
+  3. Aggregates partial updates into complete instrument state
+  4. Serializes to JSON and publishes to Redis channel
 - **Postcondition:** Real-time market data available on `TWS:TICKS:{SYMBOL}` channel
 - **Exception:** TWS disconnection triggers reconnection logic ([§5.5](#55-key-patterns))
 
-**UC-2: Multi-Instrument Subscription**
-- **Actor:** TWS-Redis Bridge (automated)
+**UC-3: Multi-Instrument Subscription**
+- **Actor:** FastAPI backend + TWS-Redis Bridge
 - **Requirement:** Support 3+ concurrent instrument subscriptions
 - **Flow:**
-  1. Maintain map of `tickerId → InstrumentState`
-  2. Route callbacks to correct state object based on `tickerId`
-  3. Publish each instrument to dedicated Redis channel
+  1. FastAPI sends multiple subscribe commands to `TWS:COMMANDS`
+  2. Bridge maintains map of `tickerId → InstrumentState`
+  3. Route callbacks to correct state object based on `tickerId`
+  4. Publish each instrument to dedicated Redis channel
 - **Benefit:** Independent failure domains per instrument
 
-**UC-3: Historical Data Replay (Testing)**
+**UC-4: Historical Data Replay (Testing)**
 - **Actor:** Developer/CI Pipeline
 - **Precondition:** CSV tick file available (`timestamp,price,size`)
 - **Flow:**
@@ -209,20 +225,20 @@ This specification defines the requirements, architecture, and technical design 
   4. Verify Redis output matches expected JSON schema
 - **Benefit:** Offline testing without TWS dependency
 
-**UC-4: Consumer Fan-Out**
+**UC-5: Consumer Fan-Out**
 - **Actor:** FastAPI backend, analytics service, data logger (any subscriber)
-- **Precondition:** Bridge publishing to Redis
+- **Precondition:** Bridge publishing to Redis after receiving subscription command
 - **Flow:**
   1. Consumer subscribes to `TWS:TICKS:{SYMBOL}` or `TWS:TICKS:*` (wildcard)
   2. Receives JSON messages via Redis Pub/Sub
   3. Parses JSON and processes data
 - **Benefit:** Add new consumers without bridge changes
 
-**UC-5: Graceful Shutdown**
+**UC-6: Graceful Shutdown**
 - **Actor:** System administrator or process manager
 - **Flow:**
   1. Send SIGINT/SIGTERM signal
-  2. Bridge stops subscribing, disconnects from TWS
+  2. Bridge stops listening for commands, unsubscribes from TWS
   3. Drains remaining messages from queue
   4. Joins worker threads, exits cleanly
 - **Postcondition:** No resource leaks, no data corruption
@@ -277,18 +293,22 @@ The bridge supports multiple data subscription strategies to enable development 
   c.primaryExchange = "NASDAQ"; // Required for disambiguation
   ```
 
-**Redis Pub/Sub API (Output):**
-- **Channel Naming:** `TWS:TICKS:{SYMBOL}` (e.g., `TWS:TICKS:AAPL`)
-- **Status Channel:** `TWS:STATUS` (connection events, errors)
-- **Command:** `PUBLISH <channel> <json_payload>`
-- **Library:** `redis-plus-plus` (`sw::redis::Redis::publish(channel, message)`)
+**Redis Pub/Sub API (Bidirectional):**
+- **Input Channel:** `TWS:COMMANDS` (FastAPI → Bridge subscription requests)
+- **Output Channels:** `TWS:TICKS:{SYMBOL}` (Bridge → consumers tick data)
+- **Status Channel:** `TWS:STATUS` (Bridge → consumers system events)
+- **Commands:** `SUBSCRIBE` (listen for commands), `PUBLISH` (send data/status)
+- **Library:** `redis-plus-plus` (`sw::redis::Redis`, `sw::redis::Subscriber`)
 
 **CLI Interface:**
 ```bash
-# Live mode (default)
+# Live mode with dynamic subscriptions (default)
 ./tws_bridge --host 127.0.0.1 --port 4002 --client-id 0
 
-# Replay mode
+# Live mode with initial subscriptions (optional)
+./tws_bridge --host 127.0.0.1 --port 4002 --subscribe AAPL,SPY,TSLA
+
+# Replay mode (offline testing, no command listener)
 ./tws_bridge --replay ticks.csv --symbol AAPL --ticker-id 1
 
 # Configuration file
@@ -549,31 +569,36 @@ Exchange → TWS Gateway → TCP → EReader Thread →
 
 ---
 
-#### ADR-003: Three-Thread Producer-Consumer Pattern
+#### ADR-003: Four-Thread Producer-Consumer Pattern
 
-**[DECISION]** Fixed Three-Thread Architecture (not event loop, not thread pool) **[Date: 2025-11-15]**
+**[DECISION]** Fixed Four-Thread Architecture with Command Listener **[Date: 2025-11-15]**
 
-**Context:** TWS API enforces EReader threading model; need to isolate blocking Redis I/O
+**Context:** TWS API enforces EReader threading model; need to isolate blocking Redis I/O; need to handle dynamic subscriptions from FastAPI
 
 **Rationale:**
 - **TWS API constraint:** EReader thread managed by TWS library (cannot refactor)
 - **I/O isolation:** Blocking Redis `publish()` must not block EWrapper callbacks
+- **Command handling:** Separate thread for Redis SUBSCRIBE prevents blocking main event loop
 - **[PERFORMANCE]** Lock-free queue enables < 1μs callback overhead (critical path)
-- Fixed workload: single TWS connection, single Redis publisher (no need for thread pool)
+- Fixed workload: single TWS connection, single Redis publisher, single command listener
 - Simplicity: predictable threading model, easier debugging
 
 **Alternatives Rejected:**
 - **Single-threaded event loop (async I/O):** Blocks on Redis I/O, adds complexity (state machines), requires async Redis client
-- **Thread pool:** Unnecessary overhead for fixed workload (2-3 threads always active), scheduling latency, context switching
+- **Thread pool:** Unnecessary overhead for fixed workload (3-4 threads always active), scheduling latency, context switching
 - **Boost.Asio async:** Over-engineered for MVP, steep learning curve, callback spaghetti, premature optimization
-- **Two threads (merge main + EReader):** Impossible—EReader is TWS API-managed
+- **Three threads (merge command + worker):** Command listening (blocking SUBSCRIBE) would block tick publishing
+- **Polling command channel:** Adds latency, wastes CPU cycles, less responsive than blocking SUBSCRIBE
 
 **Consequences:**
-- ✅ Minimal context switching (3 threads pinned to cores)
+- ✅ Non-blocking command processing (FastAPI requests don't block data flow)
+- ✅ Minimal context switching (4 threads pinned to cores)
 - ✅ Lock-free critical path (50-200ns queue enqueue)
 - ✅ Predictable latency profile
+- ✅ Dynamic subscription management without restart
 - ❌ Fixed concurrency (cannot scale to multiple TWS connections without redesign)
 - ❌ No async I/O (acceptable: Redis latency 0.1-1ms is tolerable off critical path)
+- ❌ Additional thread overhead (~8MB stack per thread)
 
 ---
 
@@ -605,7 +630,7 @@ Exchange → TWS Gateway → TCP → EReader Thread →
 │                   TWS-Redis Bridge (C++)                         │
 │                                                                   │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │              Thread 1: EReader (TWS API)                 │   │
+│  │              Thread 4: EReader (TWS API)                 │   │
 │  │  • Reads TCP socket (blocking)                           │   │
 │  │  • Parses TWS protocol messages                          │   │
 │  │  • Enqueues EMessage objects                             │   │
@@ -613,7 +638,7 @@ Exchange → TWS Gateway → TCP → EReader Thread →
 │                          │ EReaderOSSignal                       │
 │                          │                                       │
 │  ┌───────────────────────▼─────────────────────────────────┐   │
-│  │         Thread 2: Message Processing (Main)              │   │
+│  │         Thread 1: Message Processing (Main)              │   │
 │  │  • Waits on EReaderOSSignal                              │   │
 │  │  • Calls processMsgs() → EWrapper callbacks              │   │
 │  │  • Normalizes data to TickUpdate struct                  │   │
@@ -627,32 +652,42 @@ Exchange → TWS Gateway → TCP → EReader Thread →
 │  │  • Dequeues TickUpdate (blocking wait)                   │   │
 │  │  • Updates InstrumentState map (mutex)                   │   │
 │  │  • Serializes to JSON (RapidJSON Writer)                 │   │
-│  │  • Publishes to Redis (redis-plus-plus)                  │   │
-│  └───────────────────────┬─────────────────────────────────┘   │
-└────────────────────────────┼───────────────────────────────────┘
-                             │
-                             │ TCP (Redis Protocol)
-                             │ PUBLISH commands
-                             │
-                     ┌───────▼────────┐
-                     │  Redis Server  │
-                     │   (Port 6379)  │
-                     │  Pub/Sub Broker│
-                     └───────┬────────┘
-                             │
-                             │ Redis Pub/Sub (Fan-Out)
-                             │ SUBSCRIBE channels
-              ┌──────────────┼──────────────┐
-              │              │              │
-      ┌───────▼────────┐ ┌──▼──────────┐ ┌▼──────────────┐
-      │ FastAPI/Vue.js │ │ Data Logger │ │   Analytics   │
-      │  (WebSocket)   │ │  (Python)   │ │   Service     │
-      └────────────────┘ └─────────────┘ └───────────────┘
-              │                              │
-      ┌───────▼────────┐            ┌───────▼────────┐
-      │  Web Clients   │            │   Alerting     │
-      │   (Browser)    │            │   Service      │
-      └────────────────┘            └────────────────┘
+│  │  • Publishes to TWS:TICKS:{SYMBOL}                       │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                   │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │       Thread 2: Command Listener (Subscription Mgr)      │   │
+│  │  • Subscribes to TWS:COMMANDS channel                    │   │
+│  │  • Receives subscribe/unsubscribe from FastAPI           │   │
+│  │  • Validates contracts and calls TwsClient methods       │   │
+│  │  • Publishes confirmations to TWS:STATUS                 │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└────────────────────────────┬──────────────────┬────────────────┘
+                             │                  │
+                             │ PUBLISH          │ SUBSCRIBE
+                             │ (Data/Status)    │ (Commands)
+                             │                  │
+                     ┌───────▼──────────────────▼────┐
+                     │       Redis Server            │
+                     │       (Port 6379)             │
+                     │     Pub/Sub Broker            │
+                     └───────┬──────────────┬────────┘
+                             │              │
+                   SUBSCRIBE │              │ PUBLISH
+                   (Data)    │              │ (Commands)
+              ┌──────────────┼──────┐       │
+              │              │      │       │
+      ┌───────▼────────┐ ┌──▼──────▼───┐ ┌▼──────────────┐
+      │ Data Logger    │ │ FastAPI      │ │  Analytics    │
+      │ (Python)       │ │ (WebSocket)  │ │  Service      │
+      └────────────────┘ └──────┬───────┘ └───────────────┘
+                                │
+                                │ WebSocket
+                                │
+                         ┌──────▼────────┐
+                         │  Web Clients  │
+                         │  (Browser)    │
+                         └───────────────┘
 ```
 
 **Component Relationships:**
@@ -665,14 +700,20 @@ Exchange → TWS Gateway → TCP → EReader Thread →
    - Bridge is the sole TWS API consumer
    - Direct TCP connection via TWS C++ API
 
-3. **TWS-Redis Bridge** → **Redis Server**
-   - Thread 3 (Redis Worker) publishes to Redis
-   - No direct integration between bridge and downstream consumers
+3. **FastAPI** → **Redis** → **TWS-Redis Bridge** (Command Flow)
+   - FastAPI publishes subscribe/unsubscribe commands to `TWS:COMMANDS`
+   - Bridge Thread 2 (Command Listener) receives and processes commands
+   - Dynamic subscription management based on user requests
 
-4. **Redis Server** → **Downstream Ecosystem**
+4. **TWS-Redis Bridge** → **Redis Server** (Data Flow)
+   - Thread 3 (Redis Worker) publishes tick data to `TWS:TICKS:{SYMBOL}`
+   - Thread 2 (Command Listener) publishes status to `TWS:STATUS`
+   - Bidirectional Redis communication (subscribe to commands, publish data/status)
+
+5. **Redis Server** → **Downstream Ecosystem**
    - Redis acts as data feed provider (fan-out broker)
-   - FastAPI, Data Logger, Analytics, Alerting all consume via Redis Pub/Sub
-   - No direct connection to TWS-Redis Bridge
+   - FastAPI, Data Logger, Analytics all consume via Redis Pub/Sub
+   - FastAPI also sends commands via Redis (bidirectional)
 
 ---
 
@@ -683,21 +724,56 @@ Exchange → TWS Gateway → TCP → EReader Thread →
 
 ### 3.3. Data Flow
 
-**[ARCHITECTURE]** **Critical Path Sequence:**
+**[ARCHITECTURE]** **Command Flow (FastAPI → Bridge):**
 
 ```
-Exchange → TWS Gateway → TCP → EReader (Thread 1) → 
-processMsgs() → EWrapper callback (Thread 2) → TickUpdate → 
+User Request → FastAPI → Redis PUBLISH (TWS:COMMANDS) → 
+Command Listener (Thread 2) → Parse JSON → Validate Contract → 
+TwsClient::subscribe() → TWS Gateway → Subscription Active
+```
+
+**[ARCHITECTURE]** **Data Flow (TWS → Consumers):**
+
+```
+Exchange → TWS Gateway → TCP → EReader (Thread 4) → 
+processMsgs() → EWrapper callback (Thread 1) → TickUpdate → 
 Lock-Free Queue (< 1ms) → Redis Worker (Thread 3) → 
 State Update → JSON Serialize → Redis Publish → Subscribers
 ```
 
 **Stage-by-Stage Breakdown:**
 
+**Command Path (User-Initiated Subscription):**
+
+| Stage | Component | Action | Latency | Notes |
+|-------|-----------|--------|---------|-------|
+| 1. User Request | FastAPI | User requests AAPL data | - | HTTP/WebSocket |
+| 2. Command Publish | FastAPI | `PUBLISH TWS:COMMANDS {...}` | 0.1-1ms | Redis network I/O |
+| 3. Command Receive | Bridge T2 | Blocking `SUBSCRIBE` receives msg | ~0.1-1ms | Redis Pub/Sub |
+| 4. Parse & Validate | Bridge T2 | RapidJSON parse, validate contract | 10-50μs | CPU-bound |
+| 5. TWS Subscribe | Bridge T1 | `reqTickByTickData()` to TWS | 1-10ms | TWS API call |
+| 6. Confirmation | Bridge T2 | Publish to `TWS:STATUS` | 0.1-1ms | Redis network I/O |
+| **Total Command Path** | - | **User → Active Subscription** | **< 100ms** | **Acceptable** |
+
+**Data Path (Market Event → Consumer):**
+
 | Stage | Thread | Action | Latency | Notes |
 |-------|--------|--------|---------|-------|
 | 1. Market Event | - | Exchange executes trade/quote | ~5-10ms | Network + TWS aggregation |
-| 2. TCP Read | 1 | Block on socket, decode protocol | ~0.1-1ms | Blocking I/O |
+| 2. TCP Read | 4 | Block on socket, decode protocol | ~0.1-1ms | Blocking I/O |
+| 3. EMessage Queue | 4 | Enqueue + signal | ~100ns | TWS internal atomic |
+| 4. Signal Wait | 1 | Futex wait for new messages | ~1-10μs | OS synchronization |
+| 5. processMsgs() | 1 | Decode + dispatch callback | ~10-100μs | TWS API processing |
+| 6. EWrapper Callback | 1 | **Copy to TickUpdate struct** | **< 1μs** | **CRITICAL: no I/O** |
+| 7. Lock-Free Enqueue | 1 | Atomic CAS operation | **50-200ns** | **CRITICAL: lock-free** |
+| **Producer Total** | **1+4** | **TWS → Queue** | **< 5ms** | **Target met** |
+| 8. Dequeue Wait | 3 | Futex wait on queue | ~1-100μs | Blocking OK (off critical path) |
+| 9. State Update | 3 | Mutex + map lookup + update | 1-10μs | Exclusive access (no contention) |
+| 10. JSON Serialize | 3 | RapidJSON Writer | 10-50μs | SAX API, reusable buffer |
+| 11. Redis Publish | 3 | Network I/O to Redis | 0.1-1ms | LAN latency |
+| **Consumer Total** | **3** | **Queue → Redis** | **< 2ms** | **Target met** |
+| 12. Redis Fan-Out | - | Pub/Sub dispatch | ~0.1-1ms | Redis internal |
+| **End-to-End** | **All** | **Exchange → Subscribers** | **< 20ms** | **< 50ms budget** |
 | 3. EMessage Queue | 1 | Enqueue + signal | ~100ns | TWS internal atomic |
 | 4. Signal Wait | 2 | Futex wait for new messages | ~1-10μs | OS synchronization |
 | 5. processMsgs() | 2 | Decode + dispatch callback | ~10-100μs | TWS API processing |
@@ -713,9 +789,10 @@ State Update → JSON Serialize → Redis Publish → Subscribers
 | **End-to-End** | **All** | **Exchange → Subscribers** | **< 20ms** | **< 50ms budget** |
 
 **[PERFORMANCE]** **Latency Budget:**
-- **Critical Path (Threads 1+2):** < 5ms (no blocking I/O, lock-free queue)
+- **Command Path:** < 100ms (user-initiated, infrequent, not on critical path)
+- **Critical Path (Threads 1+4):** < 5ms (no blocking I/O, lock-free queue)
 - **Consumer Path (Thread 3):** < 2ms (state update + serialize + publish)
-- **Total Budget:** < 50ms end-to-end (includes network ~5-10ms)
+- **Total Data Budget:** < 50ms end-to-end (includes network ~5-10ms)
 
 ### 3.4. Interface Definitions
 
@@ -724,12 +801,14 @@ State Update → JSON Serialize → Redis Publish → Subscribers
 **[REQUIRED]** **Channel Naming Convention:**
 
 ```
+TWS:COMMANDS           # Command channel (FastAPI → Bridge)
 TWS:TICKS:{SYMBOL}     # Real-time tick updates (per instrument)
 TWS:BARS:{SYMBOL}      # 5-second OHLCV bars (future)
 TWS:STATUS             # System events (connect/disconnect/error)
 ```
 
 **Examples:**
+- `TWS:COMMANDS` - Subscription management commands from FastAPI
 - `TWS:TICKS:AAPL` - Apple Inc. tick data
 - `TWS:TICKS:SPY` - SPDR S&P 500 ETF tick data
 - `TWS:TICKS:TSLA` - Tesla Inc. tick data
@@ -737,7 +816,13 @@ TWS:STATUS             # System events (connect/disconnect/error)
 
 **Subscription Patterns:**
 ```bash
-# Single instrument
+# Bridge subscribes to commands (internal)
+redis-cli SUBSCRIBE TWS:COMMANDS
+
+# FastAPI publishes subscription request
+redis-cli PUBLISH TWS:COMMANDS '{"action":"subscribe","symbol":"AAPL","secType":"STK"}'
+
+# Consumers subscribe to tick data
 redis-cli SUBSCRIBE TWS:TICKS:AAPL
 
 # All tick channels (wildcard)
@@ -773,12 +858,13 @@ redis-cli SUBSCRIBE TWS:STATUS
   "errorMsg": "Not connected"
 }
 
-// Subscription event
+// Subscription confirmed
 {
   "type": "subscribed",
   "timestamp": 1700000003000,
   "symbol": "AAPL",
   "tickerId": 1,
+  "requestId": "req-12345",
   "contract": {
     "symbol": "AAPL",
     "secType": "STK",
@@ -786,11 +872,97 @@ redis-cli SUBSCRIBE TWS:STATUS
     "primaryExchange": "NASDAQ"
   }
 }
+
+// Unsubscription confirmed
+{
+  "type": "unsubscribed",
+  "timestamp": 1700000004000,
+  "symbol": "AAPL",
+  "tickerId": 1,
+  "requestId": "req-67890"
+}
 ```
 
 #### 3.4.2. JSON Schemas
 
-**[REQUIRED]** **Tick Data Message Schema:**
+**[REQUIRED]** **Command Message Schema (FastAPI → Bridge):**
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["action", "symbol"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["subscribe", "unsubscribe"],
+      "description": "Command type"
+    },
+    "symbol": {
+      "type": "string",
+      "description": "Ticker symbol",
+      "example": "AAPL"
+    },
+    "secType": {
+      "type": "string",
+      "enum": ["STK", "OPT", "FUT", "IND", "FOP", "CASH", "BAG", "NEWS"],
+      "default": "STK",
+      "description": "Security type"
+    },
+    "exchange": {
+      "type": "string",
+      "default": "SMART",
+      "description": "Exchange routing",
+      "example": "SMART"
+    },
+    "currency": {
+      "type": "string",
+      "default": "USD",
+      "description": "Currency",
+      "example": "USD"
+    },
+    "primaryExchange": {
+      "type": "string",
+      "description": "Primary listing exchange (required for disambiguation)",
+      "example": "NASDAQ"
+    },
+    "requestId": {
+      "type": "string",
+      "description": "Client-generated unique ID for tracking",
+      "example": "req-12345"
+    }
+  }
+}
+```
+
+**Example Commands:**
+```json
+// Subscribe to AAPL stock
+{
+  "action": "subscribe",
+  "symbol": "AAPL",
+  "secType": "STK",
+  "exchange": "SMART",
+  "currency": "USD",
+  "primaryExchange": "NASDAQ",
+  "requestId": "req-12345"
+}
+
+// Unsubscribe from TSLA
+{
+  "action": "unsubscribe",
+  "symbol": "TSLA",
+  "requestId": "req-67890"
+}
+
+// Subscribe with minimal fields (defaults apply)
+{
+  "action": "subscribe",
+  "symbol": "SPY"
+}
+```
+
+**[REQUIRED]** **Tick Data Message Schema (Bridge → Consumers):**
 
 ```json
 {
@@ -1076,30 +1248,36 @@ services:
 
 ### 4.2. Threading Model
 
-**[ARCHITECTURE]** **Fixed Three-Thread Design:**
+**[ARCHITECTURE]** **Fixed Four-Thread Design:**
 
 | Thread | Created | Location | Responsibilities | Performance |
 |--------|---------|----------|------------------|-------------|
-| **1: Main** | Implicit (entry point) | `main()` at src/main.cpp:88 | Wait on signal, dispatch callbacks, enqueue `TickUpdate` | **< 1μs per callback** |
-| **2: Redis Worker** | `std::thread` | `main.cpp:121` | Dequeue, aggregate state, serialize JSON, publish | > 10K msg/sec |
-| **3: EReader** | TWS API internal | `TwsClient.cpp:39` | Block on socket, parse TWS protocol, enqueue messages | I/O bound |
+| **1: Main** | Implicit (entry point) | `main()` | Wait on signal, dispatch callbacks, enqueue `TickUpdate` | **< 1μs per callback** |
+| **2: Command Listener** | `std::thread` | `main.cpp` | Subscribe to `TWS:COMMANDS`, process subscribe/unsubscribe | Non-blocking |
+| **3: Redis Worker** | `std::thread` | `main.cpp` | Dequeue, aggregate state, serialize JSON, publish | > 10K msg/sec |
+| **4: EReader** | TWS API internal | `TwsClient.cpp:39` | Block on socket, parse TWS protocol, enqueue messages | I/O bound |
 
-**[IMPORTANT]** Thread numbering matches implementation. Reference `src/main.cpp` lines 149-155 for runtime thread architecture documentation.
+**[IMPORTANT]** Thread numbering reflects architectural order. Implementation details in source files.
 
 #### Thread Creation Points
 
 **Thread 1 (Main Thread):**
 - **Created**: Implicit (program entry point)
-- **Entry Function**: `int main()` at `src/main.cpp` line 88
+- **Entry Function**: `int main()`
 - **Purpose**: Runs message processing loop that dispatches EWrapper callbacks
 
-**Thread 2 (Redis Worker):**
-- **Created**: `std::thread workerThread(...)` at `src/main.cpp` line 121
-- **Entry Function**: `redisWorkerLoop()` at `src/main.cpp` lines 24-83
+**Thread 2 (Command Listener):**
+- **Created**: `std::thread commandThread(...)`
+- **Entry Function**: `commandListenerLoop()`
+- **Purpose**: Subscribes to `TWS:COMMANDS`, processes subscribe/unsubscribe requests
+
+**Thread 3 (Redis Worker):**
+- **Created**: `std::thread workerThread(...)`
+- **Entry Function**: `redisWorkerLoop()`
 - **Purpose**: Consumes tick updates, aggregates state, publishes to Redis
 
-**Thread 3 (EReader - TWS Internal):**
-- **Created**: `m_reader->start()` at `src/TwsClient.cpp` line 39 (inside `TwsClient::connect()`)
+**Thread 4 (EReader - TWS Internal):**
+- **Created**: `m_reader->start()` inside `TwsClient::connect()`
 - **Entry Function**: Hidden inside TWS library (not visible in application code)
 - **Purpose**: Socket I/O, TWS protocol parsing, signaling Thread 1
 
@@ -1107,7 +1285,7 @@ services:
 
 **Lifecycle:**
 - Application main thread (implicit creation at program start)
-- Runs message processing loop at `src/main.cpp` lines 149-159 until disconnect
+- Runs message processing loop until disconnect
 
 **Responsibilities:**
 - Wait for signal: `m_signal->waitForSignal()` (futex, ~1-10μs)
@@ -1122,7 +1300,7 @@ services:
 - **[ANTI-PATTERN]** No mutex locks (critical path)
 - **[REQUIRED]** Just copy data and enqueue
 
-**Code Pattern** (see `src/TwsClient.cpp` lines 119-140):
+**Code Pattern:**
 ```cpp
 void TwsClient::tickByTickBidAsk(int reqId, time_t time, 
                                   double bidPrice, double askPrice,
@@ -1144,17 +1322,84 @@ void TwsClient::tickByTickBidAsk(int reqId, time_t time,
 }
 ```
 
-#### Thread 2: Redis Worker (Consumer Thread)
+#### Thread 2: Command Listener (Subscription Manager)
 
 **Lifecycle:**
-- Created in `main()` before TWS connection at `src/main.cpp` line 121
-- Entry function: `redisWorkerLoop()` at `src/main.cpp` lines 24-83
+- Created in `main()` before TWS connection
+- Entry function: `commandListenerLoop()`
 - Runs until `g_running.store(false)` signaled
-- Joined on graceful shutdown at `main.cpp` line 166
+- Joined on graceful shutdown
+
+**Responsibilities:**
+- Subscribe to `TWS:COMMANDS` Redis channel (blocking subscribe)
+- Receive command messages from FastAPI
+- Parse JSON commands (RapidJSON Document API)
+- Validate contract fields (symbol, secType, exchange)
+- Call `TwsClient::subscribe()` or `TwsClient::unsubscribe()`
+- Publish confirmation/error to `TWS:STATUS`
+
+**Performance Characteristics:**
+- Command rate: 1-10 commands/minute (low frequency, user-driven)
+- Latency: 10-100ms acceptable (not on critical path)
+- Blocking Redis SUBSCRIBE OK (separate thread)
+
+**Code Pattern:**
+```cpp
+void commandListenerLoop(sw::redis::Redis& redis,
+                         TwsClient& client,
+                         std::atomic<bool>& running) {
+    auto subscriber = redis.subscriber();
+    subscriber.subscribe("TWS:COMMANDS");
+    
+    subscriber.on_message([&](std::string channel, std::string msg) {
+        // Parse JSON command
+        rapidjson::Document doc;
+        doc.Parse(msg.c_str());
+        
+        std::string action = doc["action"].GetString();
+        std::string symbol = doc["symbol"].GetString();
+        
+        if (action == "subscribe") {
+            // Build TWS contract
+            Contract contract;
+            contract.symbol = symbol;
+            contract.secType = doc.HasMember("secType") ? 
+                doc["secType"].GetString() : "STK";
+            contract.exchange = doc.HasMember("exchange") ? 
+                doc["exchange"].GetString() : "SMART";
+            contract.currency = doc.HasMember("currency") ? 
+                doc["currency"].GetString() : "USD";
+            
+            // Request subscription from TWS
+            int tickerId = client.subscribe(contract);
+            
+            // Publish confirmation to TWS:STATUS
+            publishStatus(redis, "subscribed", symbol, tickerId, 
+                         doc.HasMember("requestId") ? doc["requestId"].GetString() : "");
+        } else if (action == "unsubscribe") {
+            client.unsubscribe(symbol);
+            publishStatus(redis, "unsubscribed", symbol, 0,
+                         doc.HasMember("requestId") ? doc["requestId"].GetString() : "");
+        }
+    });
+    
+    while (running.load()) {
+        subscriber.consume(); // Blocking wait for messages
+    }
+}
+```
+
+#### Thread 3: Redis Worker (Consumer Thread)
+
+**Lifecycle:**
+- Created in `main()` after command listener
+- Entry function: `redisWorkerLoop()`
+- Runs until `g_running.store(false)` signaled
+- Joined on graceful shutdown
 
 **Responsibilities:**
 - Non-blocking dequeue: `queue.try_dequeue(update)` with sleep fallback
-- State aggregation: Merge BidAsk + AllLast updates into `InstrumentState` (no mutex in MVP)
+- State aggregation: Merge BidAsk + AllLast updates into `InstrumentState`
 - Serialize: `serializeState(state)` → JSON string (RapidJSON)
 - Publish: `redis.publish(channel, json)` (blocking network I/O - acceptable here)
 
@@ -1163,7 +1408,7 @@ void TwsClient::tickByTickBidAsk(int reqId, time_t time,
 - Latency: 1-2ms per message (acceptable, off critical path)
 - Blocking I/O isolated from Thread 1 callbacks
 
-**Code Pattern** (see `src/main.cpp` lines 34-77):
+**Code Pattern:**
 ```cpp
 void redisWorkerLoop(ConcurrentQueue<TickUpdate>& queue, 
                      RedisPublisher& redis,
@@ -1173,7 +1418,7 @@ void redisWorkerLoop(ConcurrentQueue<TickUpdate>& queue,
     
     while (running.load()) {
         if (queue.try_dequeue(update)) {
-            // Route by tickerId to symbol (temporary hardcoded mapping)
+            // Route by tickerId to symbol (dynamic mapping from subscriptions)
             std::string symbol = getSymbolFromTickerId(update.tickerId);
             
             // Aggregate BidAsk + AllLast into complete state
@@ -1198,10 +1443,10 @@ void redisWorkerLoop(ConcurrentQueue<TickUpdate>& queue,
 }
 ```
 
-#### Thread 3: EReader (TWS API Internal)
+#### Thread 4: EReader (TWS API Internal)
 
 **Lifecycle:**
-- Created by `m_reader->start()` at `src/TwsClient.cpp` line 39
+- Created by `m_reader->start()` inside `TwsClient::connect()`
 - Managed entirely by TWS API library
 - Runs until `eDisconnect()` called
 
@@ -1221,9 +1466,10 @@ void redisWorkerLoop(ConcurrentQueue<TickUpdate>& queue,
 
 | Resource | Mechanism | Threads | Performance | Location |
 |----------|-----------|---------|-------------|----------|
-| `m_queue` (lock-free) | Atomic operations | 1 → 2 | 50-200ns | Passed to TwsClient |
-| `m_signal` | EReaderOSSignal | 3 → 1 | ~1-10μs | TWS API internal |
-| `g_running` | `std::atomic<bool>` | main, 2 | ~1ns | main.cpp:17 |
+| `m_queue` (lock-free) | Atomic operations | 1 → 3 | 50-200ns | Passed to TwsClient |
+| `m_signal` | EReaderOSSignal | 4 → 1 | ~1-10μs | TWS API internal |
+| `g_running` | `std::atomic<bool>` | main, 2, 3 | ~1ns | main.cpp |
+| `m_subscriptions` | `std::mutex` | 1, 2 | ~10μs | Shared subscription map |
 
 ### 4.3. Memory Management
 
@@ -2141,22 +2387,25 @@ redis-cli SUBSCRIBE "TWS:TICKS:AAPL"
 | Thread | Managed By | Creation Point | Purpose | Critical Path | Performance Target | Context |
 |--------|-----------|----------------|---------|---------------|-------------------|---------|
 | **Thread 1: Main** | Application | Implicit (entry point) | Process callbacks, enqueue `TickUpdate` | **YES** | **< 1μs per callback** | EWrapper callbacks execute here |
-| **Thread 2: Redis Worker** | Application | `main.cpp:121` | Dequeue, update state, serialize, publish | No | > 10K msg/sec | Blocking I/O OK |
-| **Thread 3: EReader** | TWS API | `TwsClient.cpp:39` | Read TCP socket, parse TWS protocol | No | I/O bound | Don't modify (TWS managed) |
+| **Thread 2: Command Listener** | Application | `main.cpp` | Subscribe to `TWS:COMMANDS`, process FastAPI requests | No | 1-10 cmd/min | Blocking SUBSCRIBE OK |
+| **Thread 3: Redis Worker** | Application | `main.cpp` | Dequeue, update state, serialize, publish | No | > 10K msg/sec | Blocking I/O OK |
+| **Thread 4: EReader** | TWS API | `TwsClient.cpp:39` | Read TCP socket, parse TWS protocol | No | I/O bound | Don't modify (TWS managed) |
 
 **Creation Locations:**
-- **Thread 1**: Implicit at `int main()` entry point (`src/main.cpp` line 88)
-- **Thread 2**: `std::thread workerThread(...)` at `src/main.cpp` line 121
-- **Thread 3**: `m_reader->start()` inside `TwsClient::connect()` at `src/TwsClient.cpp` line 39
+- **Thread 1**: Implicit at `int main()` entry point
+- **Thread 2**: `std::thread commandThread(...)` for command listening
+- **Thread 3**: `std::thread workerThread(...)` for Redis publishing
+- **Thread 4**: `m_reader->start()` inside `TwsClient::connect()`
 
 **Inter-Thread Communication:**
-- **Thread 3 → Thread 1:** `EReaderOSSignal` (TWS internal futex, ~1-10μs)
-- **Thread 1 → Thread 2:** `moodycamel::ConcurrentQueue` (lock-free, 50-200ns)
+- **Thread 4 → Thread 1:** `EReaderOSSignal` (TWS internal futex, ~1-10μs)
+- **Thread 1 → Thread 3:** `moodycamel::ConcurrentQueue` (lock-free, 50-200ns)
+- **Thread 2 ↔ Main:** Shared `TwsClient` with mutex for subscribe/unsubscribe
 
 **Synchronization:**
-- `m_queue` - Lock-free atomic (Threads 1 → 2)
-- `stateMap` - No mutex in MVP (Thread 2 exclusive)
-- `g_running` - `std::atomic<bool>` (main, Thread 2)
+- `m_queue` - Lock-free atomic (Thread 1 → Thread 3)
+- `m_subscriptions` - `std::mutex` (Threads 1, 2)
+- `g_running` - `std::atomic<bool>` (main, Threads 2, 3)
 
 #### C.2. TWS API Communication Model
 
@@ -2183,9 +2432,9 @@ EWrapper (callbacks)            EClientSocket (commands)
 **Outbound Communication (Application → TWS):**
 - **Interface**: `EClientSocket`
 - **Wrapper**: `TwsClient` has `std::unique_ptr<EClientSocket> m_client`
-- **Execution Context**: Called from **Thread 1** (Main)
-- **Key Methods**: `eConnect()`, `reqTickByTickData()`, `eDisconnect()`
-- **Pattern**: `client.connect()` → `m_client->eConnect(...)` → network I/O
+- **Execution Context**: Called from **Thread 1** (Main) or **Thread 2** (Command Listener)
+- **Key Methods**: `eConnect()`, `reqTickByTickData()`, `cancelTickByTickData()`, `eDisconnect()`
+- **Pattern**: `client.subscribe()` → `m_client->reqTickByTickData(...)` → network I/O
 
 **[IMPORTANT]** "EWrapper" is a confusing name - think "ECallbackInterface" instead.
 

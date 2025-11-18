@@ -9,8 +9,8 @@
 #include "EClient.h"
 #include "EClientMsgSink.h"
 #include "ESocket.h"
+#include "IErrorHandler.h"
 
-class EWrapper;
 class EReader;
 struct EReaderSignal;
 
@@ -23,7 +23,7 @@ protected:
 
 public:
 
-	explicit EClientSocket(EWrapper *ptr, EReaderSignal *pSignal = 0);
+	explicit EClientSocket(IErrorHandler *ptr, EReaderSignal *pSignal = 0);
 	virtual ~EClientSocket();
 
 	bool eConnect( const char *host, int port, int clientId = 0, bool extraAuth = false);

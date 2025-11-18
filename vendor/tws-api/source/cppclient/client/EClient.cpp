@@ -7,7 +7,6 @@
 
 #include "EClient.h"
 
-#include "EWrapper.h"
 #include "TwsSocketClientErrors.h"
 #include "Contract.h"
 #include "Order.h"
@@ -173,7 +172,7 @@ void EClient::EncodeRawInt(std::ostream& buf, int intValue)
 
 ///////////////////////////////////////////////////////////
 // member funcs
-EClient::EClient( EWrapper *ptr, ETransport *pTransport)
+EClient::EClient( IErrorHandler *ptr, ETransport *pTransport)
     : m_pEWrapper(ptr)
     , m_transport(pTransport)
     , m_clientId(-1)
@@ -4025,7 +4024,7 @@ bool EClient::extraAuth() {
     return m_extraAuth;
 }
 
-EWrapper * EClient::getWrapper() const
+IErrorHandler * EClient::getErrorHandler() const
 {
     return m_pEWrapper;
 }

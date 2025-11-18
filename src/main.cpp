@@ -149,7 +149,7 @@ int main(int argc, char* argv[]) {
         TwsClient client(queue);
         
         // NOTE: client.connect() internally calls m_reader->start() which spawns Thread 3 (EReader)
-        if (!client.connect(TWS_HOST, TWS_PORT, CLIENT_ID)) {
+        if (!client.createConnection(TWS_HOST, TWS_PORT, CLIENT_ID)) {
             std::cerr << "[MAIN] Failed to connect to TWS Gateway\n";
             g_running.store(false);
             workerThread.join();

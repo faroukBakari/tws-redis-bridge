@@ -21,6 +21,7 @@
 #include "PlaceOrderRequest.pb.h"
 #include "CancelOrderRequest.pb.h"
 #include "GlobalCancelRequest.pb.h"
+#include "IErrorHandler.h"
 
 namespace ibapi {
 namespace client_constants {
@@ -234,7 +235,7 @@ class TWSAPIDLLEXP EClient
 
 public:
 
-	explicit EClient(EWrapper *ptr, ETransport *pTransport);
+	explicit EClient(IErrorHandler *ptr, ETransport *pTransport);
 	virtual ~EClient();
 
 	virtual void eDisconnect(bool resetState) = 0;
@@ -274,7 +275,7 @@ public:
 public:
 
 	// access to protected variables
-	EWrapper * getWrapper() const;
+	IErrorHandler * getErrorHandler() const;
 protected:
 	void setClientId(int clientId);
 	void setExtraAuth(bool extraAuth);
@@ -435,7 +436,7 @@ protected:
 
 protected:
 
-	EWrapper *m_pEWrapper;
+	IErrorHandler *m_pEWrapper;
 	std::unique_ptr<ETransport> m_transport;
 
 private:
